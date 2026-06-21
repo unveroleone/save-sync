@@ -279,20 +279,17 @@ static void *_applist_init(UNUSED(void *data)) {
   }
   sqlite3_rw_exit();
 
-  // ponytail: fallback — scan save dirs when db query returns nothing
-  FILE *dbg = fopen("ux0:data/save-sync/debug.txt", "w");
-  if (dbg) { fprintf(dbg, "sqlite_rc=%d list_size=%d\n", rc, list->size); }
+  // ponytail: fallback — scan save dirs, only include real PS Vita game saves (PCS prefix)
   if (list->size == 0) {
     char *save_dirs[2] = {"ux0:user/00/savedata", "grw0:savedata"};
     for (int d = 0; d < 2; d++) {
       int dfd = sceIoDopen(save_dirs[d]);
-      if (dbg) { fprintf(dbg, "dir[%d]=%s dfd=%d\n", d, save_dirs[d], dfd); }
       if (dfd < 0) continue;
       SceIoDirent entry;
       while (sceIoDread(dfd, &entry) > 0) {
-        if (dbg) { fprintf(dbg, "entry=%s mode=%d\n", entry.d_name, (int)entry.d_stat.st_mode); }
         if (!SCE_S_ISDIR(entry.d_stat.st_mode)) continue;
-        if (entry.d_name[0] == '.') continue;
+        // skip homebrew and system dirs (only real game saves start with PCS)
+        if (strncmp(entry.d_name, "PCS", 3) != 0) continue;
         AppInfo *info = realloc(list->list, (list->size + 1) * sizeof(AppInfo));
         if (!info) break;
         list->list = info;
@@ -300,13 +297,14 @@ static void *_applist_init(UNUSED(void *data)) {
         app->title_id = strdup(entry.d_name);
         app->real_id = strdup(entry.d_name);
         app->name = strdup(entry.d_name);
-        app->iconpath = strdup("");
+        char iconpath_buf[64];
+        snprintf(iconpath_buf, sizeof(iconpath_buf), "ux0:app/%s/sce_sys/icon0.png", entry.d_name);
+        app->iconpath = strdup(iconpath_buf);
         list->size++;
       }
       sceIoDclose(dfd);
     }
   }
-  if (dbg) { fprintf(dbg, "final_size=%d\n", list->size); fclose(dbg); }
 
   if (rc != 0 && list->size == 0) {
     applist_free(list);
