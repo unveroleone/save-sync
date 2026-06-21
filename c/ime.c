@@ -84,12 +84,12 @@ char *show_psv_ime(char *input_init) {
   sceImeDialogParamInit(&param);
   // config
   param.supportedLanguages =
-      SCE_IME_LANGUAGE_ENGLISH | SCE_IME_LANGUAGE_SIMPLIFIED_CHINESE;
+      SCE_IME_LANGUAGE_ENGLISH;
   param.languagesForced = SCE_TRUE;
   param.type = SCE_IME_DIALOG_TEXTBOX_MODE_DEFAULT;
   param.option = 0;
   param.textBoxMode = SCE_IME_DIALOG_TEXTBOX_MODE_DEFAULT;
-  param.title = u"请输入名字";
+  param.title = u"Enter text";
   param.maxTextLength = SCE_IME_DIALOG_MAX_TEXT_LENGTH;
   param.initialText = input_init_buf;
   param.inputTextBuffer = input;

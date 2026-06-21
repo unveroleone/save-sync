@@ -233,12 +233,10 @@ impl UIBase for UISettings {
 
 impl UISettings {
     fn mask_token(&self) -> String {
-        let t = &self.config.api_token;
-        if t.len() <= 4 {
-            return "****".to_string();
+        if self.config.api_token.is_empty() {
+            return "(not set)".to_string();
         }
-        let visible = 4;
-        format!("{}{}", &t[..visible], "•".repeat(t.len() - visible))
+        "••••••••".to_string()
     }
 
     pub fn get_config(&self) -> &Config {

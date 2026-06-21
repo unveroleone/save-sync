@@ -425,11 +425,7 @@ impl UIBase for UICloud {
 
         let games = self.games.read().unwrap();
         if games.is_empty() && !self.pending.load(Ordering::Relaxed) {
-            let msg = if Config::global().is_configured() {
-                "Loading sync data..."
-            } else {
-                "Server not configured. Press (Triangle) for Settings."
-            };
+            let msg = "No sync data. Press △ for Settings.";
             vita2d_draw_text(
                 (SCREEN_WIDTH - vita2d_text_width(1.0, msg)) / 2,
                 SCREEN_HEIGHT / 2,

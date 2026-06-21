@@ -43,7 +43,7 @@ pub const DESKTOP_BOTTOM_BAR_CLOUD_TEXT: &str =
 
 // save drawer (local tab)
 pub const SAVE_DRAWER_BOTTOM_BAR_TEXT: &str =
-    "(SEL) Upload  (□) Restore  (△) Delete  (〇) Close  (X) Select";
+    "(SEL)Up  (□)Restore  (△)Del  (〇)Close  (X)Sel";
 // save drawer (cloud/server tab)
 pub const SAVE_DRAWER_CLOUD_BOTTOM_BAR_TEXT: &str =
     "(SEL) Download  (□) Restore  (△) Delete  (〇) Close  (X) Select";

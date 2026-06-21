@@ -2,6 +2,7 @@
 #include "vitashell_user.h"
 
 #include <psp2/appmgr.h>
+#include <psp2/iofcnt.h>
 #include <psp2/kernel/modulemgr.h>
 #include <psp2/registrymgr.h>
 #include <psp2/sqlite.h>
@@ -278,7 +279,31 @@ static void *_applist_init(UNUSED(void *data)) {
   }
   sqlite3_rw_exit();
 
-  if (rc != 0) {
+  // ponytail: fallback — scan save dirs when db query returns nothing
+  if (list->size == 0) {
+    char *save_dirs[2] = {"ux0:user/00/savedata", "grw0:savedata"};
+    for (int d = 0; d < 2; d++) {
+      int dfd = sceIoDopen(save_dirs[d]);
+      if (dfd < 0) continue;
+      SceIoDirent entry;
+      while (sceIoDread(dfd, &entry) > 0) {
+        if (!SCE_S_ISDIR(entry.d_stat.st_mode)) continue;
+        if (entry.d_name[0] == '.') continue;
+        AppInfo *info = realloc(list->list, (list->size + 1) * sizeof(AppInfo));
+        if (!info) break;
+        list->list = info;
+        AppInfo *app = &list->list[list->size];
+        app->title_id = strdup(entry.d_name);
+        app->real_id = strdup(entry.d_name);
+        app->name = strdup(entry.d_name);
+        app->iconpath = strdup("");
+        list->size++;
+      }
+      sceIoDclose(dfd);
+    }
+  }
+
+  if (rc != 0 && list->size == 0) {
     applist_free(list);
     list = NULL;
   }
