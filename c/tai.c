@@ -280,13 +280,17 @@ static void *_applist_init(UNUSED(void *data)) {
   sqlite3_rw_exit();
 
   // ponytail: fallback — scan save dirs when db query returns nothing
+  FILE *dbg = fopen("ux0:data/save-sync/debug.txt", "w");
+  if (dbg) { fprintf(dbg, "sqlite_rc=%d list_size=%d\n", rc, list->size); }
   if (list->size == 0) {
     char *save_dirs[2] = {"ux0:user/00/savedata", "grw0:savedata"};
     for (int d = 0; d < 2; d++) {
       int dfd = sceIoDopen(save_dirs[d]);
+      if (dbg) { fprintf(dbg, "dir[%d]=%s dfd=%d\n", d, save_dirs[d], dfd); }
       if (dfd < 0) continue;
       SceIoDirent entry;
       while (sceIoDread(dfd, &entry) > 0) {
+        if (dbg) { fprintf(dbg, "entry=%s mode=%d\n", entry.d_name, (int)entry.d_stat.st_mode); }
         if (!SCE_S_ISDIR(entry.d_stat.st_mode)) continue;
         if (entry.d_name[0] == '.') continue;
         AppInfo *info = realloc(list->list, (list->size + 1) * sizeof(AppInfo));
@@ -302,6 +306,7 @@ static void *_applist_init(UNUSED(void *data)) {
       sceIoDclose(dfd);
     }
   }
+  if (dbg) { fprintf(dbg, "final_size=%d\n", list->size); fclose(dbg); }
 
   if (rc != 0 && list->size == 0) {
     applist_free(list);

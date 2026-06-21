@@ -241,10 +241,12 @@ impl UIBase for UIDesktop {
         self.draw_device();
         // draw cloud
         self.draw_cloud();
-        // draw bottom bar
-        self.draw_bottom_bar();
-
-        // draw selected child
+        // draw selected child (draw first so bottom bar renders on top)
         (self.children[self.selected_idx as usize]).draw(app_data);
+
+        // skip desktop bottom bar when child owns the full screen (e.g. settings overlay)
+        if !self.children[self.selected_idx as usize].is_forces() {
+            self.draw_bottom_bar();
+        }
     }
 }
