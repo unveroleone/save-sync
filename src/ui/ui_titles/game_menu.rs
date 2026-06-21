@@ -62,7 +62,7 @@ impl GameMenu {
     }
 
     pub fn update(&mut self, buttons: u32, title: &Title, titles: &Titles) {
-        if !self.is_pending() && is_button(buttons, SceCtrlButtons::SceCtrlCross) {
+        if !self.is_pending() && is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
             self.close();
         } else {
             self.list.update(buttons, title, titles);

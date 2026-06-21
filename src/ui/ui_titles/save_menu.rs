@@ -134,7 +134,7 @@ impl SaveMenu {
         if self.is_pending() {
             return;
         }
-        if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
+        if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
             self.close();
         } else if (is_button(buttons, SceCtrlButtons::SceCtrlLtrigger)
             || is_button(buttons, SceCtrlButtons::SceCtrlRtrigger))

@@ -317,7 +317,7 @@ impl UIList for SaveListCloud {
         self.scroll_progress.update(buttons);
         let selected_idx = self.list_state.selected_idx;
 
-        if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+        if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
             if let Some(item) = self.get_cloud_item(selected_idx) {
                 match item {
                     CloudItem::UploadAction => {

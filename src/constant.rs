@@ -37,18 +37,18 @@ pub const TEXT_R: &str = "-> R";
 
 // desktop bottom bar
 pub const DESKTOP_BOTTOM_BAR_TEXT: &str =
-    "(START) Exit    (□) About    (△) Saves    (〇) Backup/Restore";
+    "(START) Exit    (□) About    (△) Menu    (X) Saves";
 pub const DESKTOP_BOTTOM_BAR_CLOUD_TEXT: &str =
-    "(START) Exit    (X) Back";
+    "(START) Exit";
 
 // save drawer (local tab)
 pub const SAVE_DRAWER_BOTTOM_BAR_TEXT: &str =
-    "(SELECT) Upload    (□) Restore    (△) Delete    (X) Close    (〇) Select";
+    "(SEL) Upload  (□) Restore  (△) Delete  (〇) Close  (X) Select";
 // save drawer (cloud/server tab)
 pub const SAVE_DRAWER_CLOUD_BOTTOM_BAR_TEXT: &str =
-    "(SELECT) Download    (□) Restore    (△) Delete    (X) Close    (〇) Select";
-pub const ACTION_DRAWER_BOTTOM_BAR_TEXT: &str = "(X) Close    (〇) Select";
-pub const TITLE_DRAWER_BOTTOM_BAR_TEXT: &str = "(X) Close    (〇) Select";
+    "(SEL) Download  (□) Restore  (△) Delete  (〇) Close  (X) Select";
+pub const ACTION_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
+pub const TITLE_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
 
 // save menu tabs
 pub const TAB_LOCAL: &str = "Local Backup";
@@ -79,8 +79,8 @@ pub const LIST_NAME_WIDTH: i32 = SCREEN_WIDTH / 2 - 40;
 pub const DIALOG_WIDTH: i32 = 600;
 pub const DIALOG_HEIGHT: i32 = 260;
 pub const DIALOG_BOTTOM_TOP: i32 = 220;
-pub const DIALOG_CONFIRM_TEXT: &str = "(〇) Confirm";
-pub const DIALOG_CANCEL_TEXT: &str = "(X) Cancel";
+pub const DIALOG_CONFIRM_TEXT: &str = "(X) Confirm";
+pub const DIALOG_CANCEL_TEXT: &str = "(〇) Cancel";
 
 // about dialog text
 pub const ABOUT_TEXT: &str = "Save Sync v0.1.0 — Two-Vita save sync tool";

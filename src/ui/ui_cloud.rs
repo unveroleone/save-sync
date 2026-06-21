@@ -371,7 +371,8 @@ impl UIBase for UICloud {
         // Handle settings mode
         if self.show_settings {
             if let Some(ref mut settings) = self.settings {
-                if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
+                settings.update(app_data, buttons);
+                if settings.should_close {
                     if settings.dirty {
                         let config = settings.get_config().clone();
                         config.save();
@@ -380,16 +381,19 @@ impl UIBase for UICloud {
                     }
                     self.show_settings = false;
                     self.settings = None;
-                    // Trigger refresh
                     self.games.write().unwrap().clear();
-                    return;
                 }
-                settings.update(app_data, buttons);
             }
             return;
         }
 
-        // Normal sync view
+        // Always allow settings access
+        if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {
+            self.show_settings = true;
+            self.settings = Some(UISettings::new(&Config::global()));
+            return;
+        }
+
         if self.pending.load(Ordering::Relaxed) {
             if !Loading::is_pending() {
                 self.pending.store(false, Ordering::Relaxed);
@@ -407,9 +411,6 @@ impl UIBase for UICloud {
 
         if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
             self.sync_all();
-        } else if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {
-            self.show_settings = true;
-            self.settings = Some(UISettings::new(&Config::global()));
         }
     }
 
@@ -504,7 +505,7 @@ impl UIBase for UICloud {
         vita2d_line(0.0, 32.0, SCREEN_WIDTH as f32, 32.0, rgba(0x66, 0x66, 0x66, 0xff));
 
         // Bottom bar
-        let bar = "(X) Sync All    (△) Settings    (↕) Select";
+        let bar = "(X) Sync All  (△) Settings";
         vita2d_line(
             0.0,
             (SCREEN_HEIGHT - 58) as f32,

@@ -299,7 +299,7 @@ impl UIBase for UITitles {
         } else {
             if app_data.titles.size() > 0 {
                 // open save menu
-                if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+                if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
                     self.save_menu.open(
                         app_data
                             .titles

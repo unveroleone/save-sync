@@ -251,7 +251,7 @@ impl UIList for SaveListLocal {
         self.scroll_progress.update(buttons);
         let selected_idx = self.list_state.selected_idx;
         let idx = selected_idx - 1;
-        if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+        if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
             if selected_idx == 0 {
                 self.do_backup_game_save(game_save_dir, None);
             } else {

@@ -25,13 +25,13 @@ impl UIDialog {
             if open && Instant::now() - toggle_at > ANIME_TIME_160 {
                 let buttons = vita2d_ctrl_peek_positive();
                 result = match buttons {
-                    _ if is_button(buttons, SceCtrlButtons::SceCtrlCircle)
-                        && is_button(buttons, SceCtrlButtons::SceCtrlCross) =>
+                    _ if is_button(buttons, SceCtrlButtons::SceCtrlCross)
+                        && is_button(buttons, SceCtrlButtons::SceCtrlCircle) =>
                     {
                         None
                     }
-                    _ if is_button(buttons, SceCtrlButtons::SceCtrlCircle) => Some(true),
-                    _ if is_button(buttons, SceCtrlButtons::SceCtrlCross) => Some(false),
+                    _ if is_button(buttons, SceCtrlButtons::SceCtrlCross) => Some(true),
+                    _ if is_button(buttons, SceCtrlButtons::SceCtrlCircle) => Some(false),
                     _ => None,
                 };
                 if result.is_some() {

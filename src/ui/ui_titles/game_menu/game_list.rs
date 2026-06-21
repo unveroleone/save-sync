@@ -272,7 +272,7 @@ impl GameList {
             return;
         }
         let ListState { selected_idx, .. } = self.list_state;
-        if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+        if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
             let action = &self.list[selected_idx as usize];
             match action {
                 GameMenuAction::LaunchApp => {

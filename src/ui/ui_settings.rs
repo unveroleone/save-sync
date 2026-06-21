@@ -17,6 +17,7 @@ pub struct UISettings {
     config: Config,
     testing: bool,
     pub dirty: bool,
+    pub should_close: bool,
 }
 
 impl UISettings {
@@ -26,6 +27,7 @@ impl UISettings {
             config: config.clone(),
             testing: false,
             dirty: false,
+            should_close: false,
         }
     }
 
@@ -111,15 +113,18 @@ impl UIBase for UISettings {
             return;
         }
 
-        if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
-            return; // handled by parent
+        if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+            // Close without saving
+            self.should_close = true;
+            self.dirty = false;
+            return;
         }
 
         if is_button(buttons, SceCtrlButtons::SceCtrlUp) {
             self.selected_idx = (self.selected_idx - 1).max(0);
         } else if is_button(buttons, SceCtrlButtons::SceCtrlDown) {
             self.selected_idx = (self.selected_idx + 1).min(self.field_count() - 1);
-        } else if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+        } else if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
             match self.selected_idx {
                 0 => {
                     let input = show_keyboard(&self.config.server_url);
@@ -150,7 +155,8 @@ impl UIBase for UISettings {
                     }
                 }
                 4 => {
-                    // "Save & Back" — handled by parent
+                    self.dirty = true;
+                    self.should_close = true;
                 }
                 _ => {}
             }
@@ -201,7 +207,7 @@ impl UIBase for UISettings {
         vita2d_draw_text(x + 8, y + 22, rgba(0xff, 0x88, 0x88, 0xff), 1.0, "Save && Back");
 
         // Bottom bar
-        let bar = "(O) Edit    (X) Back";
+        let bar = "(X) Edit    (O) Back";
         vita2d_line(
             0.0,
             (SCREEN_HEIGHT - 58) as f32,
