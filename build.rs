@@ -2,6 +2,8 @@ use std::env;
 
 fn main() {
     let vitasdk = env::var("VITASDK").unwrap_or_else(|_| "/usr/local/vitasdk".to_string());
+    let ar = env::var("TARGET_AR")
+        .unwrap_or_else(|_| format!("{}/bin/arm-vita-eabi-ar", vitasdk));
 
     println!("cargo:rustc-link-search=all=./c");
     println!(
@@ -43,6 +45,7 @@ fn main() {
         .include("./c")
         .static_flag(true)
         .warnings(false)
+        .ar(&ar)
         .define("SQLITE_THREADSAFE", Some("0"))
         .define("SQLITE_OMIT_LOAD_EXTENSION", None)
         .define("SQLITE_OMIT_DEPRECATED", None)
@@ -54,15 +57,18 @@ fn main() {
     cc::Build::new()
         .file("./c/tai.c")
         .static_flag(true)
+        .ar(&ar)
         .compile("tai");
 
     cc::Build::new()
         .file("./c/v2d.c")
         .static_flag(true)
+        .ar(&ar)
         .compile("v2d");
 
     cc::Build::new()
         .file("./c/ime.c")
         .static_flag(true)
+        .ar(&ar)
         .compile("ime");
 }
