@@ -20,9 +20,12 @@
 #define PLUGIN_KERNEL_PATH "ux0:app/SAVSYNC01/sce_sys/resources/kernel.skprx"
 #define PLUGIN_USER_PATH "ux0:app/SAVSYNC01/sce_sys/resources/user.suprx"
 
-static void sqlite3_rw_init(void) {}
-static void sqlite3_rw_exit(void) {}
-
+__attribute__((weak)) void sqlite3_rw_init(void) {
+    sqlite3_initialize();
+}
+__attribute__((weak)) void sqlite3_rw_exit(void) {
+    sqlite3_shutdown();
+}
 __attribute__((weak)) void prevent_to_sleep(void) {}
 __attribute__((weak)) void launch_app_by_title_id(const char *title_id) {}
 #define SFO_MAGIC 0x46535000 // \x00PSF
@@ -260,7 +263,7 @@ static void *_applist_init(UNUSED(void *data)) {
                 " order by a.titleid";
 
   sqlite3 *db;
-  int rc = sqlite3_open_v2(PSV_APP_DB, &db, SQLITE_OPEN_READWRITE, NULL);
+  int rc = sqlite3_open_v2(PSV_APP_DB, &db, SQLITE_OPEN_READONLY, NULL);
   if (rc == 0) {
     char *errMsg = NULL;
     rc = sqlite3_exec(db, query, get_applist_callback, (void *)list, &errMsg);
