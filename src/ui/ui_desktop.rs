@@ -217,10 +217,14 @@ impl UIBase for UIDesktop {
             if !(is_button(buttons, SceCtrlButtons::SceCtrlLtrigger)
                 && is_button(buttons, SceCtrlButtons::SceCtrlRtrigger))
             {
+                let prev = self.selected_idx;
                 if is_button(buttons, SceCtrlButtons::SceCtrlLtrigger) {
                     self.selected_idx = 0;
                 } else if is_button(buttons, SceCtrlButtons::SceCtrlRtrigger) {
                     self.selected_idx = 1;
+                }
+                if self.selected_idx != prev {
+                    self.children[self.selected_idx as usize].invalidate();
                 }
             }
         }

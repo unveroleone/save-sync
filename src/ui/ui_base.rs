@@ -6,4 +6,5 @@ pub trait UIBase {
     fn is_forces(&self) -> bool {
         false
     }
+    fn invalidate(&mut self) {}
 }

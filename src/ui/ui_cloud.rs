@@ -365,7 +365,16 @@ fn status_priority(status: &SyncStatus) -> i32 {
     }
 }
 
+impl UICloud {
+    pub fn invalidate(&mut self) {
+        self.games.write().unwrap().clear();
+    }
+}
+
 impl UIBase for UICloud {
+    fn invalidate(&mut self) {
+        self.games.write().unwrap().clear();
+    }
     fn update(&mut self, app_data: &mut AppData, buttons: u32) {
         // Handle settings mode
         if self.show_settings {

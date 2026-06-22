@@ -164,6 +164,9 @@ impl UIBase for UISettings {
     }
 
     fn draw(&self, _app_data: &crate::app::AppData) {
+        // cover the tab bar and background drawn by UIDesktop
+        vita2d_draw_rect(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32, rgba(0x10, 0x10, 0x10, 0xff));
+
         // header
         let title = "Settings";
         vita2d_draw_text(

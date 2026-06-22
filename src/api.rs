@@ -64,6 +64,7 @@ impl Api {
     }
 
     pub fn test_connection(config: &Config) -> Result<StatusResponse, String> {
+        // Step 1: check reachability and get server version
         let url = Api::build_url(config, "/api/status");
         let response = ureq::get(&url)
             .call()
@@ -71,7 +72,25 @@ impl Api {
         let body = response
             .into_string()
             .map_err(|e| format!("Read failed: {}", e))?;
-        serde_json::from_str(&body).map_err(|e| format!("Invalid response: {}", e))
+        let status: StatusResponse =
+            serde_json::from_str(&body).map_err(|e| format!("Invalid response: {}", e))?;
+
+        // Step 2: validate token against an auth-protected endpoint
+        let manifest_url = Api::build_url(config, "/api/manifest");
+        let auth_resp = ureq::get(&manifest_url)
+            .set("Authorization", &Api::auth_value(config))
+            .call();
+        match auth_resp {
+            Err(ureq::Error::Status(401, _)) => {
+                return Err("Invalid token. Check Settings.".to_string());
+            }
+            Err(e) => {
+                return Err(format!("Token check failed: {}", e));
+            }
+            Ok(_) => {}
+        }
+
+        Ok(status)
     }
 
     pub fn get_cloud_manifest(config: &Config) -> Result<CloudManifest, String> {
