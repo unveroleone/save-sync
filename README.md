@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="screenshot.png" width="480" alt="Save Sync on PS Vita">
+  <img src="screenshot-game.png" width="480" alt="Save Sync on PS Vita">
 </p>
 
 <h1 align="center">Save Sync</h1>
@@ -137,6 +137,10 @@ Press **R** (main screen) to switch to the Cloud tab. It shows every game with a
 Press **X** to run **Sync All** — it uploads everything marked Upload and downloads everything marked Download. Conflicts are reported but not touched.
 
 Press **Triangle** to open Settings.
+
+<p align="center">
+  <img src="screenshot-cloud.png" width="480" alt="Save Sync on PS Vita">
+</p>
 
 ---
 
