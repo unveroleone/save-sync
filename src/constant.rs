@@ -83,4 +83,4 @@ pub const DIALOG_CONFIRM_TEXT: &str = "(X) Confirm";
 pub const DIALOG_CANCEL_TEXT: &str = "(〇) Cancel";
 
 // about dialog text
-pub const ABOUT_TEXT: &str = "Save Sync v0.1.0 — Two-Vita save sync tool";
+pub const ABOUT_TEXT: &str = "Save Sync — Two-Vita save sync tool by unveroleone"; 

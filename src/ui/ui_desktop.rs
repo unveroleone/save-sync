@@ -25,7 +25,8 @@ const IMAGE_DEVICE_BG_PATH: &str = "app0:sce_sys/resources/device_bg.jpg";
 const ICON_SIZE: i32 = 70;
 const ICON_OFFSET: i32 = 10;
 const ICON_GAP: i32 = 20;
-const TEXT_VERSION: &str = "V0.1.0";
+const TEXT_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+const TEXT_CREDIT: &str = "by unveroleone";
 
 pub struct UIDesktop {
     selected_idx: i32,
@@ -103,10 +104,18 @@ impl UIDesktop {
         // version
         vita2d_draw_text(
             ICON_OFFSET + (70 - vita2d_text_width(0.61, TEXT_VERSION)) / 2,
-            80 + vita2d_text_height(0.61, TEXT_VERSION) / 2,
+            70 + vita2d_text_height(0.61, TEXT_VERSION) / 2,
             rgba(0xff, 0xff, 0xff, 0xff),
             0.61,
             TEXT_VERSION,
+        );
+        // credit
+        vita2d_draw_text(
+            ICON_OFFSET + (70 - vita2d_text_width(0.51, TEXT_CREDIT)) / 2,
+            82 + vita2d_text_height(0.51, TEXT_CREDIT) / 2,
+            rgba(0xaa, 0xaa, 0xaa, 0xff),
+            0.51,
+            TEXT_CREDIT,
         );
         vita2d_draw_text(
             ICON_OFFSET + ICON_SIZE + ICON_GAP - vita2d_text_width(0.61, TEXT_L),
