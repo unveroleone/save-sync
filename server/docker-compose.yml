@@ -1,6 +1,6 @@
 services:
   vita-save-sync:
-    build: .
+    image: ghcr.io/unveroleone/vita-save-sync-server:latest
     container_name: vita-save-sync
     restart: unless-stopped
     ports:

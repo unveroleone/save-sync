@@ -36,11 +36,19 @@ Requires HENkaku + iTLS-Enso on the Vita and a server you control (VPS, home ser
 
 ## Server setup
 
+The server image is published to GitHub Container Registry. No build step needed.
+
 ```bash
 cd server
 cp .env.example .env
 # Edit .env: set USER_TOKEN to a long random string
 docker compose up -d
+```
+
+To update the server later:
+
+```bash
+docker compose pull && docker compose up -d
 ```
 
 Put it behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS. The Vita needs HTTPS with a valid certificate — iTLS-Enso provides the modern TLS roots.

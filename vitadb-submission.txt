@@ -1,0 +1,41 @@
+Hi, submitting a new homebrew for VitaDB.
+
+Name: Save Sync
+
+Author: unveroleone
+
+Version: 0.1.2
+
+Single line description: Manual cloud save sync for modded PS Vitas and PSTVs, self-hosted.
+
+Full description:
+Save Sync backs up PS Vita save data to a zip and uploads it to your own server.
+Download and restore on another device to keep saves in sync. Works with any number
+of Vitas and PSTVs sharing one server.
+
+The server is a single Docker command. Set a token, run `docker compose up -d`, and
+point a reverse proxy at it for HTTPS.
+
+Features:
+- Upload to Server: zips the save, uploads, deletes the temp file in one step
+- Download & Restore: pulls from server and restores directly, creates a safety backup first
+- Download from server without restoring
+- Cloud tab with per-game sync status (Synced, Upload Needed, Download Available, Conflict)
+- Sync All to batch upload and download everything
+- Local backup slots for manual snapshots
+- TLS via iTLS-Enso + rustls
+
+Forked from Save Cloud Vita by iamcco. The original used Baidu Cloud with Chinese UI.
+All strings are in English. Baidu integration is replaced with a self-hosted HTTP API
+(Node.js + Fastify). VitaShell's custom SQLite VFS is integrated for reading game names
+and icons from ur0:shell/db/app.db.
+
+Link: https://github.com/unveroleone/vita-save-sync/releases/download/v0.1.2/vita-save-cloud.vpk
+
+Source: https://github.com/unveroleone/vita-save-sync
+
+Data folder: ux0:data/save-sync/
+
+Title ID: SAVSYNC01
+
+Attaching screenshots below.

@@ -1,0 +1,34 @@
+name: Publish Server Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/**'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: server
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/vita-save-sync-server:latest
+            ghcr.io/${{ github.repository_owner }}/vita-save-sync-server:${{ github.sha }}
