@@ -78,7 +78,7 @@ impl SaveListCloud {
     }
 
     fn item_count(&self) -> i32 {
-        2 + if self.cloud_entry.read().unwrap().is_some() { 1 } else { 0 }
+        2 + if self.cloud_entry.read().unwrap().is_some() { 2 } else { 0 }
     }
 
     fn get_cloud_item(&self, idx: i32) -> Option<CloudItem> {

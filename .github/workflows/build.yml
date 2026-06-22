@@ -1,0 +1,61 @@
+name: Build VPK
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: vitasdk/vitasdk:latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Rust
+        uses: actions/cache@v4
+        with:
+          path: |
+            /root/.rustup
+            /root/.cargo/registry
+            /root/.cargo/git
+            /root/.cargo/bin
+          key: rust-nightly-2025-06-01-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rust-nightly-2025-06-01-
+
+      - name: Install Rust and cargo-vita
+        run: |
+          export CARGO_HOME=/root/.cargo
+          export RUSTUP_HOME=/root/.rustup
+          if ! command -v rustup &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain none --no-modify-path
+          fi
+          export PATH="/root/.cargo/bin:$PATH"
+          rustup toolchain install nightly-2025-06-01 --component rust-src
+          cargo install cargo-vita --locked 2>/dev/null || true
+          echo "/root/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build VPK
+        run: cargo vita build vpk --release
+        env:
+          VITASDK: /usr/local/vitasdk
+          CARGO_HOME: /root/.cargo
+          RUSTUP_HOME: /root/.rustup
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vita-save-cloud
+          path: target/armv7-sony-vita-newlibeabihf/release/vita-save-cloud.vpk
+          if-no-files-found: error
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/armv7-sony-vita-newlibeabihf/release/vita-save-cloud.vpk
+          name: Save Sync ${{ github.ref_name }}
