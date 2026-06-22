@@ -22,111 +22,158 @@
 
 ---
 
-## Features
+## What it does
 
-- Local save backup to `ux0:data/save-sync/backups/<TITLEID>/`
-- Upload saves to a self-hosted server with SHA-256 verification
-- Download newer saves from the server
-- Restore saves with automatic pre-restore safety backup
-- Sync overview with per-game status badges (In Sync, Upload Needed, Download Available, Conflict)
-- Sync All: upload changed, download newer, stop on conflicts
-- Device pairing with a static API token
-- Settings screen: server URL, token, device name, test connection
-- TLS 1.2 support via iTLS-Enso + rustls on Vita
+- Backs up PS Vita save data to a zip locally, then uploads to your own server
+- Downloads saves from the server to a second Vita
+- Restores downloaded saves (creates a safety backup first)
+- Shows per-game sync status on the Cloud tab
+- TLS via iTLS-Enso + rustls on Vita
 
-## Quick start
+Requires HENkaku + iTLS-Enso on the Vita and a server you control (VPS, home server, etc.).
 
-### 1. Run the server
+---
+
+## Server setup
 
 ```bash
 cd server
 cp .env.example .env
-# Edit .env: set USER_TOKEN, USER_NAME, DATA_DIR
+# Edit .env: set USER_TOKEN to a long random string, USER_NAME to your username
 docker compose up -d
 ```
 
-Or bare metal:
+Put it behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS. The Vita needs HTTPS with a valid certificate — iTLS-Enso provides the modern TLS roots.
+
+Bare metal alternative:
 
 ```bash
-cd server && cp .env.example .env
-pnpm install && pnpm run build
-USER_TOKEN=your-secret USER_NAME=you DATA_DIR=/data/vita-save-sync node dist/index.js
+cd server && pnpm install && pnpm run build
+USER_TOKEN=your-secret USER_NAME=you DATA_DIR=/data node dist/index.js
 ```
 
-Put it behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS access from outside.
+> **Note:** `docker compose restart` keeps the old environment. If you change `.env`, run `docker compose up -d` to recreate the container.
 
-### 2. Build the Vita app
+---
 
-Requires macOS or Linux:
+## Build the Vita app
+
+Requires macOS or Linux with VitaSDK installed.
 
 ```bash
 # One-time setup
-brew install cmake                              # macOS
+brew install cmake
 git clone https://github.com/vitasdk/vdpm && cd vdpm
 ./bootstrap-vitasdk.sh && ./install-all.sh
 # Add to ~/.zshrc:
 #   export VITASDK=/usr/local/vitasdk
 #   export PATH=$VITASDK/bin:$PATH
+
 rustup install nightly-2025-06-01
 rustup component add rust-src --toolchain nightly-2025-06-01
 cargo +nightly install cargo-vita
 
-# Then in the project directory:
+# Build
 rustup override set nightly-2025-06-01
-git submodule update --init
 cargo vita build vpk --release
 ```
 
-The VPK lands at `target/armv7-sony-vita-newlibeabihf/release/vita-save-cloud.vpk`.
+VPK output: `target/armv7-sony-vita-newlibeabihf/release/vita-save-cloud.vpk`
 
-### 3. Install and use on Vita
+---
 
-1. Transfer the VPK to your Vita and install
-2. Open the app, press **R** to switch to the Sync view
-3. Press **Triangle** to open Settings
-4. Enter your server URL, API token, and device name
-5. Press "Test Connection" to verify
+## First-time setup on the Vita
 
-**Titles view (L):**
-- Game icons with save paths
-- **Circle**: per-game backup/restore drawer
-- **Triangle**: game menu (backup all, update account ID, delete)
+1. Install the VPK via VitaShell
+2. Open Save Sync
+3. Press **R** to switch to the Cloud tab
+4. Press **Triangle** to open Settings
+5. Fill in **Server URL** (e.g. `https://vita-sync.example.com`), **API Token**, and **Device Name**
+6. Select **Test Connection** — it checks both reachability and your token
+7. Press **O** to go back, or select **Save && Back**
 
-**Sync view (R):**
-- Game list with sync status badges
-- **X**: Sync All (upload changed, download newer, skip conflicts)
-- **Triangle**: Settings
+---
 
-**Per-game save drawer:**
-- Local tab: backup, restore, upload (SELECT)
-- Server tab: upload to server, download, download & restore
+## Workflow
+
+### Backing up and uploading a save
+
+1. Press **L** to go to the Games tab
+2. Select a game with **Up/Down**
+3. Press **O** to open the save drawer
+4. In the **Local Backup** column, press **X** to back up locally
+   — This zips the raw save files to `ux0:data/save-sync/backups/<TITLEID>/`
+5. In the **Server Backup** column, press **Select** to upload to the server
+   — The server stores the zip and records the hash and timestamp in the manifest
+
+That's one complete backup. The server now has this save.
+
+### Restoring on a second Vita
+
+1. Set up the second Vita with the same server URL and token (different device name)
+2. Go to the Games tab, select the game, press **O** to open the drawer
+3. In the **Server Backup** column, press **Square** to download
+   — The zip lands in `ux0:data/save-sync/backups/<TITLEID>/`
+4. In the **Local Backup** column, press **Square** to restore
+   — Save Sync backs up the current save first, then replaces it with the downloaded one
+
+### Other actions in the save drawer
+
+| Button | Local Backup column | Server Backup column |
+|--------|---------------------|----------------------|
+| X | Back up now | — |
+| Select | Upload to server | Download from server |
+| Square | Restore | Download & restore |
+| Triangle | Delete local backup | — |
+| O | Close drawer | — |
+
+### Cloud tab
+
+Press **R** to switch to the Cloud tab. It shows every game with a sync status badge:
+
+| Badge | Meaning |
+|-------|---------|
+| Synced | Local and cloud match |
+| Not Uploaded | Local backup exists, nothing on server yet |
+| Upload | Local is newer than server |
+| Download | Server has a newer version |
+| Cloud Only | On server, no local backup on this Vita |
+| Conflict | Both sides changed since last sync |
+
+Press **X** to run **Sync All** — it uploads everything marked Upload and downloads everything marked Download. It stops and reports any Conflicts without touching them.
+
+Press **Triangle** to open Settings from the Cloud tab.
+
+---
 
 ## Server API
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | `GET` | `/api/status` | No | Health check, server version |
-| `POST` | `/api/pair` | Token in body | Register device |
-| `GET` | `/api/manifest` | Bearer | Cloud manifest |
-| `PUT` | `/api/manifest` | Bearer | Update manifest |
+| `GET` | `/api/manifest` | Bearer | Cloud manifest for all games |
 | `PUT` | `/api/save/:titleId` | Bearer | Upload save zip |
 | `GET` | `/api/save/:titleId` | Bearer | Download save zip |
+
+Upload sends `X-Save-Hash` (SHA-256), `X-Save-Timestamp`, and `X-Device-Id` headers. The server verifies the hash before writing.
+
+---
 
 ## Vita folder layout
 
 ```
 ux0:data/save-sync/
   config.json          # server URL, token, device name
-  manifest.json        # local sync baseline
-  backups/             # local save zips
+  backups/
     PCSE00001/
-      2026-06-21 15.42.00.zip
-  downloads/           # staging before restore
+      2026-06-21 15.42.00.zip   # local backup zips
   logs/
     latest.log
 ```
 
+---
+
 ## Credits
 
 Forked from [Save Cloud Vita](https://github.com/save-cloud) by iamcco.
-Uses [VitaShell](https://github.com/TheOfficialFloW/VitaShell) kernel modules, [vita-rust](https://github.com/vita-rust), [VitaSDK](https://github.com/vitasdk).
+Uses [VitaShell](https://github.com/TheOfficialFloW/VitaShell) SQLite VFS and kernel modules, [vita-rust](https://github.com/vita-rust), [VitaSDK](https://github.com/vitasdk).

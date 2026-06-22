@@ -481,11 +481,11 @@ impl UIBase for UICloud {
                 };
                 vita2d_draw_text(x + 8, y + 20, rgba(0xff, 0xff, 0xff, 0xff), 1.0, &display_name);
 
-                // Status badge — right-aligned so long labels don't overflow
+                // Status badge — fixed right edge at SCREEN_WIDTH-24 for breathing room
                 let label = Self::status_label(&game.status);
                 let color = Self::status_color(&game.status);
                 let badge_w = vita2d_text_width(1.0, label) + 12;
-                let badge_x = SCREEN_WIDTH - badge_w - 8;
+                let badge_x = SCREEN_WIDTH - badge_w - 24;
                 vita2d_draw_rect(badge_x as f32, (y) as f32, badge_w as f32, 24.0, color);
                 vita2d_draw_text(
                     badge_x + 6,
