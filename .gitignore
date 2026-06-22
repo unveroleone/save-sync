@@ -10,3 +10,4 @@ server/.env
 
 # Local cargo config (machine-specific paths)
 .cargo/
+.DS_Store
