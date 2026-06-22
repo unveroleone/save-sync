@@ -35,25 +35,10 @@ fn main() {
     println!("cargo:rustc-link-lib=static=SceRegistryMgr_stub");
     println!("cargo:rustc-link-lib=static=SceAppUtil_stub");
 
-    // sqlite
-    println!("cargo:rustc-link-lib=static=sqlite");
+    // Use firmware SQLite (SceSqlite_stub) — same as Chinese version, gives access to ur0: VFS
     println!("cargo:rustc-link-lib=static=SceSqlite_stub");
     println!("cargo:rustc-link-lib=static=SceLibKernel_stub");
     println!("cargo:rustc-link-lib=static=VitaShellUser_stub_weak");
-
-    // Compile SQLite amalgamation
-    cc::Build::new()
-        .file("./c/sqlite3.c")
-        .include("./c")
-        .static_flag(true)
-        .warnings(false)
-        .define("SQLITE_THREADSAFE", Some("0"))
-        .define("SQLITE_OMIT_LOAD_EXTENSION", None)
-        .define("SQLITE_OMIT_DEPRECATED", None)
-        .define("SQLITE_OMIT_PROGRESS_CALLBACK", None)
-        .define("SQLITE_OMIT_WAL", None)
-        .define("SQLITE_DEFAULT_MEMSTATUS", Some("0"))
-        .compile("sqlite");
 
     cc::Build::new()
         .file("./c/tai.c")
