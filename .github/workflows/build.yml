@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install native build tools
+        run: apt-get update -qq && apt-get install -y -qq gcc
+
       - name: Cache Rust
         uses: actions/cache@v4
         with:
@@ -27,24 +30,23 @@ jobs:
           restore-keys: rust-nightly-2025-06-01-
 
       - name: Install Rust and cargo-vita
+        env:
+          HOME: /root
+          CARGO_HOME: /root/.cargo
+          RUSTUP_HOME: /root/.rustup
         run: |
-          export CARGO_HOME=/root/.cargo
-          export RUSTUP_HOME=/root/.rustup
-          if ! command -v rustup &>/dev/null; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-              sh -s -- -y --default-toolchain none --no-modify-path
-          fi
-          export PATH="/root/.cargo/bin:$PATH"
-          rustup toolchain install nightly-2025-06-01 --component rust-src
-          cargo install cargo-vita --locked 2>/dev/null || true
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+            sh -s -- -y --default-toolchain none --no-modify-path
+          /root/.cargo/bin/rustup toolchain install nightly-2025-06-01 --component rust-src
+          /root/.cargo/bin/cargo install cargo-vita --locked
           echo "/root/.cargo/bin" >> "$GITHUB_PATH"
+          echo "CARGO_HOME=/root/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=/root/.rustup" >> "$GITHUB_ENV"
 
       - name: Build VPK
         run: cargo vita build vpk --release
         env:
           VITASDK: /usr/local/vitasdk
-          CARGO_HOME: /root/.cargo
-          RUSTUP_HOME: /root/.rustup
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
