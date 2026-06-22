@@ -90,7 +90,9 @@ USER_TOKEN=your-secret DATA_DIR=/data node dist/index.js
 
 ## First-time setup on the Vita
 
-1. Install the VPK via VitaShell
+Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/info/1418) (search "Save Sync") or download it from [GitHub Releases](https://github.com/unveroleone/vita-save-sync/releases) and install manually via VitaShell.
+
+1. Install the VPK
 2. Open Save Sync
 3. Press **R** to switch to the Cloud tab
 4. Press **Triangle** to open Settings
