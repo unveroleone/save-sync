@@ -210,4 +210,4 @@ ux0:data/save-sync/
 Forked from [Save Cloud Vita](https://github.com/save-cloud) by iamcco.
 Uses [VitaShell](https://github.com/TheOfficialFloW/VitaShell) SQLite VFS and kernel modules, [vita-rust](https://github.com/vita-rust), [VitaSDK](https://github.com/vitasdk).
 
-Built with the help of [Claude](https://claude.ai) (Anthropic).
+Built with the help of AI
