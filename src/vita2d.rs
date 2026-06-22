@@ -162,12 +162,18 @@ pub fn vita2d_draw_rect(x: f32, y: f32, w: f32, h: f32, color: u32) {
 }
 
 pub fn vita2d_draw_texture(texture: &Vita2dTexture, x: f32, y: f32) {
+    if texture.tex.is_null() {
+        return;
+    }
     unsafe {
         v2d_draw_texture(texture.tex, x, y);
     }
 }
 
 pub fn vita2d_draw_texture_scale(texture: &Vita2dTexture, x: f32, y: f32, sx: f32, sy: f32) {
+    if texture.tex.is_null() {
+        return;
+    }
     unsafe {
         v2d_draw_texture_scale(texture.tex, x, y, sx, sy);
     }

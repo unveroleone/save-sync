@@ -54,7 +54,7 @@ pub fn compute_status(entry: &GameSyncEntry) -> SyncStatus {
         &entry.cloud_hash,
         &entry.last_synced_hash,
     ) {
-        (None, None, _) => SyncStatus::InSync,
+        (None, None, _) => SyncStatus::LocalOnly,
         (Some(_), None, _) => SyncStatus::LocalOnly,
         (None, Some(_), _) => SyncStatus::CloudOnly,
         (Some(local), Some(cloud), last_synced) => {

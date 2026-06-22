@@ -297,9 +297,7 @@ static void *_applist_init(UNUSED(void *data)) {
         app->title_id = strdup(entry.d_name);
         app->real_id = strdup(entry.d_name);
         app->name = strdup(entry.d_name);
-        char iconpath_buf[64];
-        snprintf(iconpath_buf, sizeof(iconpath_buf), "ux0:app/%s/sce_sys/icon0.png", entry.d_name);
-        app->iconpath = strdup(iconpath_buf);
+        app->iconpath = strdup("");
         list->size++;
       }
       sceIoDclose(dfd);

@@ -328,11 +328,11 @@ impl UICloud {
 
     fn status_label(status: &SyncStatus) -> &'static str {
         match status {
-            SyncStatus::InSync => "In Sync",
+            SyncStatus::InSync => "Synced",
             SyncStatus::UploadNeeded => "Upload",
             SyncStatus::DownloadAvailable => "Download",
             SyncStatus::Conflict => "Conflict",
-            SyncStatus::LocalOnly => "Local Only",
+            SyncStatus::LocalOnly => "Not Uploaded",
             SyncStatus::CloudOnly => "Cloud Only",
         }
     }
