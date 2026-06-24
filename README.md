@@ -277,13 +277,17 @@ Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/i
 6. Select **Test Connection** (checks both reachability and your token)
 7. Press **o** to go back, or select **Save && Back**
 
+<p align="center">
+  <img src="screenshot-game.png" width="480" alt="Save Sync on PS Vita">
+</p>
+
 ---
 
 ## Save Sync Hub (Desktop / Android)
 
 Save Sync Hub is the companion app for PC and Android. It syncs PPSSPP and RetroArch saves using the same server and API token as the Vita app.
 
-Download the latest release from [GitHub Releases](https://github.com/unveroleone/vita-save-sync/releases) for your platform (`.dmg` for macOS, `.msi` for Windows, `.AppImage` for Linux, `.apk` for Android).
+Download the latest release from [GitHub Releases](https://github.com/unveroleone/vita-save-sync/releases) for your platform (`.dmg` for macOS, `.exe` for Windows, `.AppImage` for Linux, `.apk` for Android).
 
 ### First-time setup
 
