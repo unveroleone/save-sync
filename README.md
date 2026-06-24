@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="screenshot-game.png" width="480" alt="Save Sync on PS Vita">
+  <img src="assets/icons/save-sync-transparent.png" width="480" alt="Save Sync on PS Vita">
 </p>
 
 <h1 align="center">Save Sync</h1>
@@ -27,12 +27,12 @@
 
 One server, multiple clients. All saves go to the same place.
 
-**PS Vita app** (Rust homebrew, runs on the Vita itself):
+**PS Vita app**:
 - Backs up native PS Vita saves, PSP/Adrenaline saves, and RetroArch saves
 - Uploads to your server as a zip, downloads and restores on another Vita
 - Shows per-game sync status on the Cloud tab with one-tap Sync All
 
-**Save Sync Hub** (Tauri v2 + Svelte, runs on desktop and Android):
+**Save Sync Hub** (Desktop / Android):
 - Syncs PPSSPP and RetroArch saves from macOS, Windows, Linux, and Android
 - Detects default save locations automatically per platform
 - Upload to server, download to local, or restore directly from cloud
@@ -42,7 +42,7 @@ One server, multiple clients. All saves go to the same place.
 
 ## Clients at a glance
 
-| Client | Runs on | Emulators / saves |
+| Client | Runs on | Emu  lators / saves |
 |--------|---------|-------------------|
 | Save Sync (Vita app) | PS Vita, PSTV | Native Vita · PSP (Adrenaline) · RetroArch |
 | Save Sync Hub | macOS · Windows · Linux · Android | PPSSPP · RetroArch · Custom path |
@@ -279,7 +279,7 @@ Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/i
 
 ---
 
-## Save Sync Hub (desktop / Android)
+## Save Sync Hub (Desktop / Android)
 
 Save Sync Hub is the companion app for PC and Android. It syncs PPSSPP and RetroArch saves using the same server and API token as the Vita app.
 
@@ -298,10 +298,12 @@ Download the latest release from [GitHub Releases](https://github.com/unveroleon
 
 | Platform | PPSSPP | RetroArch |
 |----------|--------|-----------|
-| macOS | `~/Library/Application Support/ppsspp/PSP/SAVEDATA` | `~/Library/Application Support/RetroArch` |
-| Windows | `%APPDATA%\ppsspp\PSP\SAVEDATA` | `%APPDATA%\RetroArch` |
+| macOS | `~/Documents/PPSSPP/PSP/SAVEDATA` | `~/Library/Application Support/RetroArch` |
+| Windows | `%USERPROFILE%\Documents\PPSSPP\PSP\SAVEDATA` | `%APPDATA%\RetroArch` |
 | Linux | `~/.config/ppsspp/PSP/SAVEDATA` | `~/.config/retroarch` |
 | Android | `/storage/emulated/0/PSP/SAVEDATA` | `/storage/emulated/0/RetroArch` |
+
+> These are the most common defaults. PPSSPP varies by install method — if your saves are not found, use Browse to point to the right folder. For RetroArch, the app scans for `saves/` and `states/` subdirectories inside the path above.
 
 ### Workflow
 
@@ -373,20 +375,6 @@ Press **Triangle** to open Settings.
 | `GET` | `/api/save/:titleId` | Bearer | Download save zip |
 
 Upload sends `X-Save-Hash` (SHA-256), `X-Save-Timestamp`, and `X-Device-Id` headers. The server verifies the hash before writing.
-
----
-
-## Vita folder layout
-
-```
-ux0:data/save-sync/
-  config.json          # server URL, token, device name
-  backups/
-    PCSE00001/
-      2026-06-21 15.42.00.zip   # local backup zips
-  logs/
-    latest.log
-```
 
 ---
 

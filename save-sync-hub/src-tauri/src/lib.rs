@@ -131,11 +131,11 @@ fn scan_saves(
         let title_id = match platform.as_str() {
             "psp" => format!("PSP_{}", name),
             "retroarch" => {
-                if name == "saves" || name == "savefiles" {
-                    "RETROARCH".to_string()
-                } else {
-                    format!("RETROARCH_{}", name)
+                const SAVE_DIRS: &[&str] = &["saves", "savefiles", "states", "savestates"];
+                if !SAVE_DIRS.contains(&name.as_str()) {
+                    continue;
                 }
+                format!("RETROARCH_{}", name)
             }
             _ => name.clone(),
         };

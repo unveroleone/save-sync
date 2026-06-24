@@ -27,7 +27,7 @@ fn psp_path() -> Option<PlatformPaths> {
     {
         let home = std::env::var("HOME").ok()?;
         Some(PlatformPaths {
-            save_dir: format!("{}/Library/Application Support/ppsspp/PSP/SAVEDATA", home),
+            save_dir: format!("{}/Documents/PPSSPP/PSP/SAVEDATA", home),
             label: "PSP (PPSSPP)".to_string(),
         })
     }
@@ -43,9 +43,9 @@ fn psp_path() -> Option<PlatformPaths> {
     }
     #[cfg(target_os = "windows")]
     {
-        let appdata = std::env::var("APPDATA").ok()?;
+        let userprofile = std::env::var("USERPROFILE").ok()?;
         Some(PlatformPaths {
-            save_dir: format!("{}\\ppsspp\\PSP\\SAVEDATA", appdata),
+            save_dir: format!("{}\\Documents\\PPSSPP\\PSP\\SAVEDATA", userprofile),
             label: "PSP (PPSSPP)".to_string(),
         })
     }
