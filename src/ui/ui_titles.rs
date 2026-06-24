@@ -14,7 +14,8 @@ use crate::{
     utils::get_active_color,
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_draw_texture_scale,
-        vita2d_load_png_buf, vita2d_text_height, vita2d_text_width, SceCtrlButtons, Vita2dTexture,
+        vita2d_load_png_buf, vita2d_set_clip, vita2d_text_height, vita2d_text_width,
+        vita2d_unset_clip, SceCtrlButtons, Vita2dTexture,
     },
 };
 
@@ -288,7 +289,17 @@ impl UITitles {
             &num,
         );
 
-        // selected icon bg highlight
+        // selected icon bg highlight — color depends on entry type
+        let highlight_color = if self.selected_idx >= native_count {
+            let emu_idx = (self.selected_idx - native_count) as usize;
+            match self.emulator_entries.get(emu_idx).map(|e| &e.kind) {
+                Some(EmulatorKind::Psp) => rgba(0xff, 0x6b, 0x9d, 0xff),
+                Some(EmulatorKind::RetroArch) => rgba(0xff, 0x77, 0x00, 0xff),
+                None => get_active_color(),
+            }
+        } else {
+            get_active_color()
+        };
         vita2d_draw_rect(
             (10 + (self.selected_idx % ICON_COL) * ICON_SIZE - 3) as f32,
             100.0
@@ -296,7 +307,7 @@ impl UITitles {
                 - 3.0,
             100.0,
             100.0,
-            get_active_color(),
+            highlight_color,
         );
     }
 
@@ -334,27 +345,29 @@ impl UITitles {
                 // emulator cell
                 let emu_idx = (icon_idx as i32 - native_count) as usize;
                 if let Some(entry) = self.emulator_entries.get(emu_idx) {
+                    let type_color = match entry.kind {
+                        EmulatorKind::Psp => rgba(0xff, 0x6b, 0x9d, 0xff),
+                        EmulatorKind::RetroArch => rgba(0xff, 0x77, 0x00, 0xff),
+                    };
+                    let border = 2;
                     let has_icon = self.icons.contains_key(&icon_idx);
                     if has_icon {
-                        // PSP icon: 144x80, scale to fit cell width, center vertically
+                        // PSP ICON0.PNG is 144x80 (16:9). Scale to fill height, center-crop width.
                         vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, icon_bg);
-                        let scale = cell_size as f32 / 144.0;
-                        let icon_h = (80.0 * scale) as i32;
-                        let y_off = (cell_size - icon_h) / 2;
+                        let scale = cell_size as f32 / 80.0;
+                        let draw_w = (144.0 * scale) as i32;
+                        let x_draw = x - (draw_w - cell_size) / 2;
+                        vita2d_set_clip(x, y, x + cell_size, y + cell_size);
                         vita2d_draw_texture_scale(
-                            self.icons.get(&icon_idx).expect("get emu icon texture"),
-                            x as f32,
-                            (y + y_off) as f32,
+                            self.icons.get(&icon_idx).expect("emu icon"),
+                            x_draw as f32,
+                            y as f32,
                             scale,
                             scale,
                         );
+                        vita2d_unset_clip();
                     } else {
-                        let border_color = match entry.kind {
-                            EmulatorKind::Psp => rgba(0x00, 0xb4, 0xd8, 0xff),
-                            EmulatorKind::RetroArch => rgba(0xff, 0x77, 0x00, 0xff),
-                        };
-                        let border = 3;
-                        vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, border_color);
+                        vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, type_color);
                         vita2d_draw_rect(
                             (x + border) as f32,
                             (y + border) as f32,
