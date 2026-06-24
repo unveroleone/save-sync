@@ -5,7 +5,7 @@
 <h1 align="center">Save Sync</h1>
 
 <p align="center">
-  <em>Self-hosted cloud save sync for PS Vita, PPSSPP, and RetroArch — across all your devices</em>
+  <em>Self-hosted cloud save sync for PS Vita, PPSSPP, and RetroArch, across all your devices</em>
 </p>
 
 <p align="center">
@@ -31,7 +31,6 @@ One server, multiple clients. All saves go to the same place.
 - Backs up native PS Vita saves, PSP/Adrenaline saves, and RetroArch saves
 - Uploads to your server as a zip, downloads and restores on another Vita
 - Shows per-game sync status on the Cloud tab with one-tap Sync All
-- TLS via iTLS-Enso + rustls — no certificate warnings on the Vita
 
 **Save Sync Hub** (Tauri v2 + Svelte, runs on desktop and Android):
 - Syncs PPSSPP and RetroArch saves from macOS, Windows, Linux, and Android
@@ -48,7 +47,7 @@ One server, multiple clients. All saves go to the same place.
 | Save Sync (Vita app) | PS Vita, PSTV | Native Vita · PSP (Adrenaline) · RetroArch |
 | Save Sync Hub | macOS · Windows · Linux · Android | PPSSPP · RetroArch · Custom path |
 
-The Vita app requires HENkaku + iTLS-Enso. Save Sync Hub is a standard desktop/Android app — no jailbreak needed on the other end.
+The Vita app requires HENkaku + iTLS-Enso. Save Sync Hub is a standard desktop/Android app (no jailbreak needed on the other end).
 
 ---
 
@@ -100,7 +99,7 @@ To update later: `docker compose pull && docker compose up -d`
 
 > **Note:** `docker compose restart` reuses the cached environment. If you change `.env`, run `docker compose up -d` instead.
 
-Put the server behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS. The Vita needs HTTPS with a valid certificate — iTLS-Enso provides the modern TLS roots.
+Put the server behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS. The Vita needs HTTPS with a valid certificate; iTLS-Enso provides the modern TLS roots.
 
 </details>
 
@@ -128,7 +127,7 @@ The server listens on port 3000. Add `PORT=3099` to the command if you need a di
 ---
 
 <details>
-<summary><strong>Option C — Raspberry Pi</strong> &nbsp;(always-on home server)</summary>
+<summary><strong>Option C | Raspberry Pi</strong> &nbsp;(always-on home server)</summary>
 
 <br>
 
@@ -192,7 +191,7 @@ Check status: `sudo systemctl status vita-save-sync`
 
 <br>
 
-**macOS** — create a launchd plist so the server starts automatically at login.
+**macOS**: create a launchd plist so the server starts automatically at login.
 
 First find your Node.js path: `which node` (commonly `/usr/local/bin/node` on Intel, `/opt/homebrew/bin/node` on Apple Silicon).
 
@@ -234,11 +233,11 @@ Load it: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vita-save-
 
 ---
 
-**Linux** — use the systemd unit from Option C. Same file, same commands.
+**Linux**: use the systemd unit from Option C. Same file, same commands.
 
 ---
 
-**Windows** — run a terminal on login and keep it open, or use Task Scheduler to launch `node dist/index.js` at boot with `USER_TOKEN` and `DATA_DIR` set as environment variables.
+**Windows**: run a terminal on login and keep it open, or use Task Scheduler to launch `node dist/index.js` at boot with `USER_TOKEN` and `DATA_DIR` set as environment variables.
 
 </details>
 
@@ -246,7 +245,7 @@ Load it: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vita-save-
 
 ### HTTPS
 
-The Vita requires HTTPS with a valid certificate. The easiest option is **Cloudflare Quick Tunnel** — no account or domain needed, just install and run:
+The Vita requires HTTPS with a valid certificate. The easiest option is **Cloudflare Quick Tunnel** (no account or domain needed). Install and run:
 
 | Platform | Install command |
 |----------|----------------|
@@ -260,7 +259,7 @@ While your server is running:
 cloudflared tunnel --url http://localhost:3000
 ```
 
-It prints a `*.trycloudflare.com` address — use that as the server URL on the Vita. The tunnel closes when you close the terminal, which is fine for occasional sync sessions.
+It prints a `*.trycloudflare.com` address. Use that as the server URL on the Vita. The tunnel closes when you close the terminal, which is fine for occasional sync sessions.
 
 For a permanent setup with your own domain, [Cloudflare Tunnel with a named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) is also free.
 
@@ -275,7 +274,7 @@ Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/i
 3. Press **R** to switch to the Cloud tab
 4. Press **Triangle** to open Settings
 5. Fill in **Server URL** (e.g. `https://vita-sync.example.com`), **API Token**, and **Device Name**
-6. Select **Test Connection** — it checks both reachability and your token
+6. Select **Test Connection** (checks both reachability and your token)
 7. Press **o** to go back, or select **Save && Back**
 
 ---
@@ -289,10 +288,10 @@ Download the latest release from [GitHub Releases](https://github.com/unveroleon
 ### First-time setup
 
 1. Open Save Sync Hub
-2. In the sidebar, enter your **Server URL**, **API Token**, and **Device Name** — same values as on the Vita
+2. In the sidebar, enter your **Server URL**, **API Token**, and **Device Name** (same values as on the Vita)
 3. Click **Save Config**
 4. Select your platform (PSP / RetroArch / Custom path)
-5. The app auto-fills the default save folder for your OS — or browse to a custom path
+5. The app auto-fills the default save folder for your OS, or browse to a custom path
 6. Click **Scan Saves** to list your save directories
 
 ### Default save paths
@@ -306,9 +305,9 @@ Download the latest release from [GitHub Releases](https://github.com/unveroleon
 
 ### Workflow
 
-- **Upload** — zips the save folder and sends it to the server
-- **Download** — fetches the latest backup from the server to a local zip
-- **Restore** — downloads from the server and extracts directly into the save folder
+- **Upload**: zips the save folder and sends it to the server
+- **Download**: fetches the latest backup from the server to a local zip
+- **Restore**: downloads from the server and extracts directly into the save folder
 
 Save IDs on the server use the folder name as the title ID, prefixed with `PSP_` or `RA_` to avoid collisions with native Vita saves.
 
@@ -354,7 +353,7 @@ Press **R** (main screen) to switch to the Cloud tab. It shows every game with a
 | Cloud Only | On server, not on this Vita |
 | Conflict | Both sides changed |
 
-Press **X** to run **Sync All** — it uploads everything marked Upload and downloads everything marked Download. Conflicts are reported but not touched.
+Press **X** to run **Sync All**. It uploads everything marked Upload and downloads everything marked Download. Conflicts are reported but not touched.
 
 Press **Triangle** to open Settings.
 
