@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/icons/save-sync-transparent.png" width="480" alt="Save Sync on PS Vita">
+  <img src="assets/icons/save-sync-transparent.png" width="200" alt="Save Sync on PS Vita">
 </p>
 
 <h1 align="center">Save Sync</h1>
