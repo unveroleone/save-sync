@@ -30,13 +30,24 @@
 - Shows per-game sync status on the Cloud tab
 - TLS via iTLS-Enso + rustls on Vita
 
-Requires HENkaku + iTLS-Enso on the Vita and a server you control (VPS, home server, etc.).
+Requires HENkaku + iTLS-Enso on the Vita and the sync server running somewhere — a laptop, a Raspberry Pi, a home server, or any machine with Node.js or Docker.
 
 ---
 
 ## Server setup
 
-Create a `docker-compose.yml` and `.env` file:
+The server is a small Node.js app. It stores save files on disk and exposes a REST API. You need to keep it running while you sync — it does not need to be on 24/7.
+
+Pick the option that fits your situation.
+
+---
+
+<details>
+<summary><strong>Option A — Docker</strong> &nbsp;(recommended if you already have Docker)</summary>
+
+<br>
+
+If you have Docker installed ([Docker Desktop](https://www.docker.com/products/docker-desktop/) for macOS/Windows, or `apt install docker.io` on Linux), create two files and run one command:
 
 ```yaml
 # docker-compose.yml
@@ -63,28 +74,177 @@ volumes:
 USER_TOKEN=change-me-to-a-long-random-string
 ```
 
-Then:
-
 ```bash
 docker compose up -d
 ```
 
-To update later:
+To update later: `docker compose pull && docker compose up -d`
+
+> **Note:** `docker compose restart` reuses the cached environment. If you change `.env`, run `docker compose up -d` instead.
+
+Put the server behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS. The Vita needs HTTPS with a valid certificate — iTLS-Enso provides the modern TLS roots.
+
+</details>
+
+---
+
+<details>
+<summary><strong>Option B — Node.js directly</strong> &nbsp;(macOS, Windows, Linux — quickest to get started)</summary>
+
+<br>
+
+You need [Node.js](https://nodejs.org/) 20 or newer. Works on macOS, Windows, and Linux.
 
 ```bash
-docker compose pull && docker compose up -d
+git clone https://github.com/unveroleone/vita-save-sync.git
+cd vita-save-sync/server
+npm install
+npm run build
+USER_TOKEN=your-secret-token DATA_DIR=./data node dist/index.js
 ```
 
-Put it behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS. The Vita needs HTTPS with a valid certificate — iTLS-Enso provides the modern TLS roots.
+The server listens on port 3000. Add `PORT=3099` to the command if you need a different port.
 
-> **Note:** `docker compose restart` keeps the old environment. If you change `.env`, run `docker compose up -d` to recreate the container.
+</details>
 
-Bare metal alternative:
+---
+
+<details>
+<summary><strong>Option C — Raspberry Pi</strong> &nbsp;(always-on home server)</summary>
+
+<br>
+
+Start from a fresh Raspberry Pi OS (Bookworm or newer). Ethernet is recommended for reliability, but Wi-Fi works too.
+
+**Install Node.js (LTS):**
 
 ```bash
-cd server && pnpm install && pnpm run build
-USER_TOKEN=your-secret DATA_DIR=/data node dist/index.js
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt install -y nodejs git
 ```
+
+**Clone and start:**
+
+```bash
+git clone https://github.com/unveroleone/vita-save-sync.git
+cd vita-save-sync/server
+npm install
+npm run build
+USER_TOKEN=your-secret-token DATA_DIR=./data node dist/index.js
+```
+
+**Auto-start on boot with systemd:**
+
+Replace `pi` with your actual username if it differs (run `whoami` to check).
+
+```bash
+sudo tee /etc/systemd/system/vita-save-sync.service << 'EOF'
+[Unit]
+Description=Save Sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/vita-save-sync/server
+Environment=USER_TOKEN=your-secret-token
+Environment=DATA_DIR=/home/pi/vita-save-sync/server/data
+Environment=PORT=3000
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now vita-save-sync
+```
+
+Check status: `sudo systemctl status vita-save-sync`
+
+</details>
+
+---
+
+<details>
+<summary><strong>Option D — Background service on your laptop</strong> &nbsp;(macOS / Linux / Windows)</summary>
+
+<br>
+
+**macOS** — create a launchd plist so the server starts automatically at login.
+
+First find your Node.js path: `which node` (commonly `/usr/local/bin/node` on Intel, `/opt/homebrew/bin/node` on Apple Silicon).
+
+Save this as `~/Library/LaunchAgents/com.vita-save-sync.plist`, replacing the paths and token:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.vita-save-sync</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>/Users/you/vita-save-sync/server/dist/index.js</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USER_TOKEN</key>
+        <string>your-secret-token</string>
+        <key>DATA_DIR</key>
+        <string>/Users/you/vita-save-sync/server/data</string>
+        <key>PORT</key>
+        <string>3000</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/you/vita-save-sync/server</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+```
+
+Load it: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.vita-save-sync.plist`
+
+---
+
+**Linux** — use the systemd unit from Option C. Same file, same commands.
+
+---
+
+**Windows** — run a terminal on login and keep it open, or use Task Scheduler to launch `node dist/index.js` at boot with `USER_TOKEN` and `DATA_DIR` set as environment variables.
+
+</details>
+
+---
+
+### HTTPS
+
+The Vita requires HTTPS with a valid certificate. The easiest option is **Cloudflare Quick Tunnel** — no account or domain needed, just install and run:
+
+| Platform | Install command |
+|----------|----------------|
+| macOS | `brew install cloudflared` |
+| Linux | `curl -L https://pkg.cloudflare.com/install.sh \| sudo bash && sudo apt install cloudflared` |
+| Windows | `winget install -e --id Cloudflare.cloudflared` |
+
+While your server is running:
+
+```bash
+cloudflared tunnel --url http://localhost:3000
+```
+
+It prints a `*.trycloudflare.com` address — use that as the server URL on the Vita. The tunnel closes when you close the terminal, which is fine for occasional sync sessions.
+
+For a permanent setup with your own domain, [Cloudflare Tunnel with a named tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) is also free.
 
 ---
 
