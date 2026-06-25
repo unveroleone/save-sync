@@ -101,6 +101,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: save-sync-hub/pnpm-lock.yaml
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: swatinem/rust-cache@v2
@@ -115,6 +120,7 @@ jobs:
           export ANDROID_SDK_ROOT=/usr/local/lib/android/sdk
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/26.3.11579264" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
           yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --licenses || true
@@ -125,6 +131,10 @@ jobs:
       - name: Install frontend deps
         working-directory: save-sync-hub
         run: pnpm install --frozen-lockfile
+
+      - name: Init Android project
+        working-directory: save-sync-hub
+        run: pnpm tauri android init
 
       - name: Build Android APK
         working-directory: save-sync-hub
