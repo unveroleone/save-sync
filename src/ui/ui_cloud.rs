@@ -115,7 +115,14 @@ impl UICloud {
                 .map(|(id, _)| id.clone())
                 .collect();
             for entry in &emu_entries {
-                let safe_name = sanitize_filename(&entry.name);
+                // PSP: use entry.id as the path suffix so the backup dir matches
+                // the path used when downloading a cloud-only PSP entry (which
+                // also uses the raw id as the name before the game is locally detected).
+                let safe_name = if entry.kind == crate::emulator::EmulatorKind::Psp {
+                    entry.id.clone()
+                } else {
+                    sanitize_filename(&entry.name)
+                };
                 let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, entry.id, safe_name);
                 let local_dir = local_dir.trim().to_string();
                 let info = Self::build_sync_info(
