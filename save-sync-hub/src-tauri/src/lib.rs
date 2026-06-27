@@ -123,7 +123,7 @@ fn process_single_entry(
     name: String,
     title_id: String,
     dir_path: PathBuf,
-    save_dir: &PathBuf, // kept for future use (e.g. icon search)
+    _save_dir: &PathBuf,
     source_label: &str,
 ) {
     let timestamp = get_dir_modified(&dir_path).unwrap_or_default();

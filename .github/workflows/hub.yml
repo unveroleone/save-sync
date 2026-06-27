@@ -54,9 +54,8 @@ jobs:
           cache-dependency-path: save-sync-hub/pnpm-lock.yaml
 
       - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Rust targets
-        run: rustup target add ${{ matrix.rust_targets }}
+        with:
+          targets: ${{ matrix.rust_targets }}
 
       - uses: swatinem/rust-cache@v2
         with:
