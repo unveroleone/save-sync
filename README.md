@@ -323,34 +323,9 @@ Save IDs on the server use the folder name as the title ID, prefixed with `PSP_`
 
 ## Workflow (PS Vita)
 
-### Uploading a save to the server
+### Cloud tab (the main way to sync)
 
-1. Press **L** to go to the Games tab
-2. Select a game
-3. Press **X** to open the save drawer
-4. Press **R** to switch to the **Server Backup** tab
-5. Select **Upload to Server** and press **X**
-
-The app zips the save, uploads it, and removes the temp file. One step.
-
-### Restoring on another device
-
-1. Set up the other device with the same server URL and token (use a different device name)
-2. Games tab → select the game → **X** to open the drawer
-3. Press **R** for the Server Backup tab
-4. Select **Download & Restore** and press **X**
-
-The app downloads from the server and restores directly. It creates a safety backup of the current save first.
-
-To download without restoring yet, select **Download from server** instead.
-
-### Local backups (optional)
-
-The **Local Backup** tab (press **L** in the drawer) manages save slots on the Vita itself, independent of the server. Use it to keep manual snapshots or restore a previous local slot.
-
-### Cloud tab
-
-Press **R** (main screen) to switch to the Cloud tab. It shows every game with a sync status badge:
+Press **R** to switch to the Cloud tab. Every game shows a sync status badge:
 
 | Badge | Meaning |
 |-------|---------|
@@ -361,12 +336,23 @@ Press **R** (main screen) to switch to the Cloud tab. It shows every game with a
 | Cloud Only | On server, not on this Vita |
 | Conflict | Both sides changed |
 
-Press **X** to run **Sync All**. It uploads everything marked Upload and downloads everything marked Download. Conflicts are reported but not touched.
+**X on a game** uploads (if marked Upload) or downloads and restores directly (if marked Download or Cloud Only). One step.
 
-Press **Triangle** to open Settings.
+**Square** runs Sync All. It uploads everything marked Upload and downloads everything marked Download. Conflicts are reported but not touched.
+
+**Triangle** opens Settings.
+
+### Games tab (local saves only)
+
+Press **L** to see your local saves. Select a game and press **X** to open the save drawer:
+
+- **Local Backup** tab (press **L** in the drawer) manages save slots on the Vita itself, independent of the server. Use it to keep manual snapshots or restore a previous local slot.
+- **Server Backup** tab (press **R** in the drawer) has manual Upload, Download, and Download & Restore options.
+
+For daily use, the Cloud tab is faster. The drawer is there for the manual actions.
 
 <p align="center">
-  <img src="screenshot-cloud.png" width="480" alt="Save Sync on PS Vita">
+  <img src="assets/icons/cloud.png" width="480" alt="Save Sync on PS Vita">
 </p>
 
 ---
