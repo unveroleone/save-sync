@@ -279,9 +279,8 @@ Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/i
 6. Select **Test Connection** (checks both reachability and your token)
 7. Press **o** to go back, or select **Save && Back**
 
-<p align="center">
-  <img src="assets/icons/games.png" width="480" alt="Save Sync on PS Vita">
-</p>
+
+<img src="assets/icons/games.png" width="480" alt="Save Sync on PS Vita">
 
 ---
 
@@ -342,9 +341,8 @@ Press **R** to switch to the Cloud tab. Every game shows a sync status badge:
 
 **Triangle** opens Settings.
 
-<p align="center">
-  <img src="assets/icons/cloud.png" width="480" alt="Save Sync Cloud tab">
-</p>
+<img src="assets/icons/cloud.png" width="480" alt="Save Sync Cloud tab">
+
 
 ### Games tab (local saves only)
 
@@ -355,10 +353,8 @@ Press **L** to see your local saves. Select a game and press **X** to open the s
 
 For daily use, the Cloud tab is faster. The drawer is there for the manual actions.
 
-<p align="center">
-  <img src="assets/icons/game2.png" width="480" alt="Save Sync save drawer">
-  <img src="assets/icons/game1.png" width="480" alt="Save Sync save drawer">
-</p>
+<img src="assets/icons/game2.png" width="480" alt="Save Sync save drawer">
+<img src="assets/icons/game1.png" width="480" alt="Save Sync save drawer">
 
 ---
 
