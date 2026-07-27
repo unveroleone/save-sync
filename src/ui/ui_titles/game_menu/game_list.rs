@@ -12,15 +12,18 @@ use std::{
 use log::error;
 
 use crate::{
-    constant::{GAME_CARD_SAVE_DIR, GAME_SAVE_DIR, SCREEN_WIDTH},
+    api::Api,
+    config::Config,
+    constant::{CANCEL_HINT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR, SCREEN_WIDTH},
+    emulator::scan_emulator_entries,
     ime::get_current_format_time,
     tai::{mount_pfs, psv_launch_app_by_title_id, unmount_pfs, Title, Titles},
     ui::{
         ui_cloud::list_state::ListState, ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast,
     },
     utils::{
-        backup_game_save, get_active_color, get_game_local_backup_dir,
-        update_sfo_file_with_current_account_id,
+        backup_game_save, backup_save_target, get_active_color, get_game_local_backup_dir,
+        sha256_file, update_sfo_file_with_current_account_id,
     },
     vita2d::{is_button, rgba, vita2d_draw_rect, vita2d_draw_text, SceCtrlButtons},
 };
@@ -28,6 +31,7 @@ use crate::{
 enum GameMenuAction {
     LaunchApp,
     BackupAllGameSave,
+    BackupAllToServer,
     UpdateAccountId,
     DeleteGameSave,
     DeleteSelectedGameSave,
@@ -41,6 +45,7 @@ impl Deref for GameMenuAction {
         match self {
             GameMenuAction::LaunchApp => "Launch Game",
             GameMenuAction::BackupAllGameSave => "Backup All Game Saves",
+            GameMenuAction::BackupAllToServer => "Backup All to Server",
             GameMenuAction::UpdateAccountId => "Update Account ID",
             GameMenuAction::DeleteGameSave => "Delete Game Save",
             GameMenuAction::DeleteSelectedGameSave => "Delete Local Backup",
@@ -55,12 +60,83 @@ impl Display for GameMenuAction {
     }
 }
 
+/// The loading dialog only draws when a desc is set, so bulk progress has to
+/// report both or the user sees nothing but a spinner.
+fn notify_bulk_progress(action: &str, idx: usize, total: usize, name: &str) {
+    Loading::notify_title(format!("{} ({}/{})    {}", action, idx, total, CANCEL_HINT));
+    Loading::notify_desc(name.to_string());
+}
+
+/// Closing message for a bulk run, so a stopped run never reads as a finished
+/// one and the counts always say what actually happened.
+fn bulk_result_message(verb: &str, done: usize, failed: usize, cancelled: bool) -> String {
+    let head = if cancelled { "Stopped" } else { "Done" };
+    if failed == 0 {
+        format!("{}: {} save(s) {}.", head, done, verb)
+    } else {
+        format!("{}: {} {}, {} failed.", head, done, verb, failed)
+    }
+}
+
+/// Park until the main thread mounts `game_save_dir`. Only the main thread may
+/// mount, so the worker asks and waits. Returns false when the run was
+/// cancelled while waiting, in which case nothing was mounted and the caller
+/// must not touch the save.
+fn wait_for_mount(
+    on_mounted: &Arc<RwLock<Option<String>>>,
+    prepare_to_mount: &Arc<RwLock<Option<String>>>,
+    cancel: &Arc<AtomicBool>,
+    game_save_dir: &str,
+) -> bool {
+    let mut is_prepare = false;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        if let Ok(mounted) = on_mounted.try_read() {
+            if let Some(mounted) = mounted.as_ref() {
+                if mounted == game_save_dir {
+                    return true;
+                }
+            }
+        }
+        if !is_prepare {
+            if let Ok(mut prepare) = prepare_to_mount.try_write() {
+                is_prepare = true;
+                *prepare = Some(game_save_dir.to_string());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Hash and upload one finished backup. Failures are logged and reported to the
+/// caller so a bulk run can keep going.
+fn upload_backup(config: &Config, title_id: &str, backup_path: &str) -> bool {
+    let hash = match sha256_file(backup_path) {
+        Ok(hash) => hash,
+        Err(err) => {
+            error!("hash {} failed: {:?}", backup_path, err);
+            return false;
+        }
+    };
+    let timestamp = get_current_format_time();
+    match Api::upload_save(config, title_id, backup_path, &hash, &timestamp) {
+        Ok(_) => true,
+        Err(err) => {
+            error!("upload {} failed: {}", title_id, err);
+            false
+        }
+    }
+}
+
 pub struct GameList {
     pending: Arc<AtomicBool>,
     list_state: ListState,
-    list: [GameMenuAction; 6],
+    list: [GameMenuAction; 7],
     game_save_dir_prepare_to_mount: Arc<RwLock<Option<String>>>,
     game_save_dir_on_mounted: Arc<RwLock<Option<String>>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl GameList {
@@ -71,6 +147,7 @@ impl GameList {
             list: [
                 GameMenuAction::LaunchApp,
                 GameMenuAction::BackupAllGameSave,
+                GameMenuAction::BackupAllToServer,
                 GameMenuAction::UpdateAccountId,
                 GameMenuAction::DeleteGameSave,
                 GameMenuAction::DeleteSelectedGameSave,
@@ -78,6 +155,16 @@ impl GameList {
             ],
             game_save_dir_prepare_to_mount: Arc::new(RwLock::new(None)),
             game_save_dir_on_mounted: Arc::new(RwLock::new(None)),
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Ask a running bulk operation to stop. There is no confirmation dialog:
+    /// UIDialog runs its own loop on the main thread, which is the same thread
+    /// the worker depends on for mounting, so blocking here would stall it.
+    fn request_cancel(&self) {
+        if !self.cancel.swap(true, Ordering::Relaxed) {
+            Toast::show("Stopping after this game...".to_string());
         }
     }
 
@@ -92,6 +179,7 @@ impl GameList {
         pending.store(true, Ordering::Relaxed);
         Loading::show();
         unmount_pfs();
+        self.clear_mounted_state();
         tokio::spawn(async move {
             let dirs = [
                 format!("{}/{}", GAME_CARD_SAVE_DIR, real_id),
@@ -178,54 +266,49 @@ impl GameList {
             })
             .collect::<Vec<(String, String, String)>>();
 
+        // Start from a known state so the first game always gets a fresh mount.
+        self.clear_mounted_state();
+        self.cancel.store(false, Ordering::Relaxed);
         let game_save_dir_on_mounted = Arc::clone(&self.game_save_dir_on_mounted);
         let game_save_dir_prepare_to_mount = Arc::clone(&self.game_save_dir_prepare_to_mount);
+        let cancel = Arc::clone(&self.cancel);
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
         Loading::show();
         tokio::spawn(async move {
+            let mut done = 0;
             let mut backup_failed_count = 0;
+            let mut cancelled = false;
             for (idx, (title_id, real_id, name)) in list.iter().enumerate() {
-                Loading::notify_title(format!(
-                    "Backing up ({}/{}): {}",
-                    idx + 1,
-                    list.len(),
-                    name
-                ));
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+                notify_bulk_progress("Backing up", idx + 1, list.len(), name);
                 let dirs = [
                     format!("{}/{}", GAME_CARD_SAVE_DIR, real_id),
                     format!("{}/{}", GAME_SAVE_DIR, real_id),
                 ];
-                let game_save_dir = dirs.iter().find(|dir| Path::new(&dir).exists());
-                if game_save_dir.is_none() {
-                    continue;
-                }
-                let game_save_dir = game_save_dir.unwrap();
-                let mut is_prepare = false;
-                loop {
-                    if let Ok(game_save_dir_on_mounted) = game_save_dir_on_mounted.try_read() {
-                        if let Some(game_save_dir_on_mounted) = game_save_dir_on_mounted.as_ref() {
-                            if game_save_dir_on_mounted == game_save_dir {
-                                break;
-                            }
-                        }
-                    }
-                    if !is_prepare {
-                        if let Ok(mut game_save_dir_prepare_to_mount) =
-                            game_save_dir_prepare_to_mount.try_write()
-                        {
-                            is_prepare = true;
-                            *game_save_dir_prepare_to_mount = Some(game_save_dir.clone());
-                        }
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                let game_save_dir = match dirs.iter().find(|dir| Path::new(&dir).exists()) {
+                    Some(dir) => dir.to_string(),
+                    None => continue,
+                };
+                if !wait_for_mount(
+                    &game_save_dir_on_mounted,
+                    &game_save_dir_prepare_to_mount,
+                    &cancel,
+                    &game_save_dir,
+                ) {
+                    cancelled = true;
+                    break;
                 }
                 let backup_to_path = format!(
                     "{}/{}.zip",
                     get_game_local_backup_dir(&title_id, &name),
                     get_current_format_time()
                 );
-                match backup_game_save(game_save_dir, &backup_to_path) {
+                match backup_game_save(&game_save_dir, &backup_to_path) {
+                    Ok(_) => done += 1,
                     Err(err) => {
                         backup_failed_count += 1;
                         error!(
@@ -234,17 +317,152 @@ impl GameList {
                         );
                         Toast::show(format!("Backup failed for {}!", name));
                     }
-                    _ => {}
                 }
             }
-            if backup_failed_count == 0 {
-                Toast::show("All backups complete!".to_string());
-            } else {
-                Toast::show(format!("{} backups failed!", backup_failed_count));
-            }
+            Toast::show(bulk_result_message(
+                "backed up",
+                done,
+                backup_failed_count,
+                cancelled,
+            ));
             Loading::hide();
             pending.store(false, Ordering::Relaxed);
         });
+    }
+
+    /// Back up every save and push it to the server in one pass. Mirrors
+    /// backup_all_game_save, including its main-thread mount handshake, and
+    /// covers emulator entries too so the whole device lands on the server.
+    pub fn backup_all_to_server(&self, titles: &Titles) {
+        let config = Config::global();
+        if !config.is_configured() {
+            Toast::show("Configure server in Settings first.".to_string());
+            return;
+        }
+
+        let list = titles
+            .iter()
+            .map(|title| {
+                (
+                    title.title_id().to_string(),
+                    title.real_id().to_string(),
+                    title.name().to_string(),
+                )
+            })
+            .collect::<Vec<(String, String, String)>>();
+        let emulator_entries = scan_emulator_entries();
+        let total = list.len() + emulator_entries.len();
+
+        if total == 0 {
+            Toast::show("No saves to upload!".to_string());
+            return;
+        }
+
+        // Dialogs run their own render loop, so confirm before spawning.
+        if !UIDialog::present(&format!("Back up and upload {} save(s) to server?", total)) {
+            return;
+        }
+
+        // Start from a known state so the first game always gets a fresh mount.
+        self.clear_mounted_state();
+        self.cancel.store(false, Ordering::Relaxed);
+        let game_save_dir_on_mounted = Arc::clone(&self.game_save_dir_on_mounted);
+        let game_save_dir_prepare_to_mount = Arc::clone(&self.game_save_dir_prepare_to_mount);
+        let cancel = Arc::clone(&self.cancel);
+        let pending = Arc::clone(&self.pending);
+        pending.store(true, Ordering::Relaxed);
+        Loading::show();
+        tokio::spawn(async move {
+            let mut uploaded = 0;
+            let mut failed = 0;
+            let mut idx = 0;
+            let mut cancelled = false;
+
+            for (title_id, real_id, name) in list.iter() {
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+                idx += 1;
+                notify_bulk_progress("Uploading", idx, total, name);
+
+                let dirs = [
+                    format!("{}/{}", GAME_CARD_SAVE_DIR, real_id),
+                    format!("{}/{}", GAME_SAVE_DIR, real_id),
+                ];
+                let game_save_dir = match dirs.iter().find(|dir| Path::new(&dir).exists()) {
+                    Some(dir) => dir.to_string(),
+                    None => continue,
+                };
+
+                if !wait_for_mount(
+                    &game_save_dir_on_mounted,
+                    &game_save_dir_prepare_to_mount,
+                    &cancel,
+                    &game_save_dir,
+                ) {
+                    cancelled = true;
+                    break;
+                }
+
+                let backup_to_path = format!(
+                    "{}/{}.zip",
+                    get_game_local_backup_dir(title_id, name),
+                    get_current_format_time()
+                );
+                if let Err(err) = backup_game_save(&game_save_dir, &backup_to_path) {
+                    failed += 1;
+                    error!(
+                        "zip {} to {} failed: {:?}",
+                        game_save_dir, backup_to_path, err
+                    );
+                    continue;
+                }
+                if upload_backup(&config, title_id, &backup_to_path) {
+                    uploaded += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+
+            // Emulator saves need no PFS mount.
+            for entry in emulator_entries.iter() {
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+                idx += 1;
+                notify_bulk_progress("Uploading", idx, total, &entry.name);
+
+                let backup_to_path = format!(
+                    "{}/{}.zip",
+                    entry.local_backup_dir(),
+                    get_current_format_time()
+                );
+                if let Err(err) = backup_save_target(&entry.save_target(), &backup_to_path) {
+                    failed += 1;
+                    error!("zip {} to {} failed: {:?}", entry.id, backup_to_path, err);
+                    continue;
+                }
+                if upload_backup(&config, &entry.id, &backup_to_path) {
+                    uploaded += 1;
+                } else {
+                    failed += 1;
+                }
+            }
+
+            Toast::show(bulk_result_message("uploaded", uploaded, failed, cancelled));
+            Loading::hide();
+            pending.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Forget which save is mounted. Anything that unmounts must call this, or
+    /// a later bulk run sees a stale match, skips its mount request and
+    /// archives an unmounted directory.
+    fn clear_mounted_state(&self) {
+        *self.game_save_dir_on_mounted.write().unwrap() = None;
+        *self.game_save_dir_prepare_to_mount.write().unwrap() = None;
     }
 
     pub fn mount_game_dir_if_exists(&self) {
@@ -269,6 +487,10 @@ impl GameList {
         self.mount_game_dir_if_exists();
 
         if self.is_pending() {
+            // A bulk run holds all input, so circle is free to mean "stop".
+            if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+                self.request_cancel();
+            }
             return;
         }
         let ListState { selected_idx, .. } = self.list_state;
@@ -289,6 +511,9 @@ impl GameList {
                         self.backup_all_game_save(titles);
                     }
                 }
+                GameMenuAction::BackupAllToServer => {
+                    self.backup_all_to_server(titles);
+                }
                 GameMenuAction::UpdateAccountId => {
                     if UIDialog::present(&GameMenuAction::UpdateAccountId) {
                         [
@@ -307,6 +532,7 @@ impl GameList {
                                     Toast::show("Account ID update failed!".to_string());
                                 }
                                 unmount_pfs();
+                                self.clear_mounted_state();
                                 return true;
                             }
                             false

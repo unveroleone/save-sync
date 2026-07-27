@@ -87,5 +87,8 @@ pub const DIALOG_BOTTOM_TOP: i32 = 220;
 pub const DIALOG_CONFIRM_TEXT: &str = "(X) Confirm";
 pub const DIALOG_CANCEL_TEXT: &str = "(〇) Cancel";
 
+// shown in the loading dialog while a bulk run is interruptible
+pub const CANCEL_HINT: &str = "(〇) Stop";
+
 // about dialog text
 pub const ABOUT_TEXT: &str = "Save Sync — Two-Vita save sync tool by unveroleone"; 

@@ -14,10 +14,12 @@ use crate::{
     api::{Api, CloudManifest},
     app::AppData,
     config::Config,
-    constant::{GAME_SAVE_LOCAL_DIR, PSP_SAVE_DIR, SCREEN_HEIGHT, SCREEN_WIDTH},
+    constant::{CANCEL_HINT, PSP_SAVE_DIR, SCREEN_HEIGHT, SCREEN_WIDTH},
     sync::SyncStatus,
     ui::{ui_dialog::UIDialog, ui_loading::Loading, ui_settings::UISettings, ui_toast::Toast},
-    utils::{get_active_color, sha256_file, zip_extract},
+    utils::{
+        get_active_color, get_game_local_backup_dir, is_grouped_archive, sha256_file, zip_extract,
+    },
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_text_width, SceCtrlButtons,
     },
@@ -29,6 +31,9 @@ use super::ui_base::UIBase;
 struct SyncGameInfo {
     title_id: String,
     name: String,
+    /// Resolved once here so every action reads the same directory. Deriving it
+    /// per call site used to make uploads and status checks disagree.
+    local_dir: String,
     status: SyncStatus,
     local_time: Option<String>,
     cloud_time: Option<String>,
@@ -42,6 +47,7 @@ pub struct UICloud {
     selected_idx: i32,
     top_row: i32,
     pending: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
     cloud_manifest: Arc<RwLock<Option<CloudManifest>>>,
     fetch_at: Arc<RwLock<u64>>,
     show_settings: bool,
@@ -57,6 +63,7 @@ impl UICloud {
             selected_idx: 0,
             top_row: 0,
             pending: Arc::new(AtomicBool::new(false)),
+            cancel: Arc::new(AtomicBool::new(false)),
             cloud_manifest: Arc::new(RwLock::new(None)),
             fetch_at: Arc::new(RwLock::new(0)),
             show_settings: false,
@@ -101,8 +108,7 @@ impl UICloud {
             // Build per-game info
             let mut info_list = Vec::new();
             for (title_id, name) in &title_list {
-                let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, title_id, name);
-                let local_dir = local_dir.trim().to_string();
+                let local_dir = get_game_local_backup_dir(title_id, name);
                 let info = Self::build_sync_info(
                     title_id, name, &local_dir, &manifest,
                 );
@@ -115,16 +121,7 @@ impl UICloud {
                 .map(|(id, _)| id.clone())
                 .collect();
             for entry in &emu_entries {
-                // PSP: use entry.id as the path suffix so the backup dir matches
-                // the path used when downloading a cloud-only PSP entry (which
-                // also uses the raw id as the name before the game is locally detected).
-                let safe_name = if entry.kind == crate::emulator::EmulatorKind::Psp {
-                    entry.id.clone()
-                } else {
-                    sanitize_filename(&entry.name)
-                };
-                let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, entry.id, safe_name);
-                let local_dir = local_dir.trim().to_string();
+                let local_dir = entry.local_backup_dir();
                 let info = Self::build_sync_info(
                     &entry.id, &entry.name, &local_dir, &manifest,
                 );
@@ -137,8 +134,7 @@ impl UICloud {
                 for (id, _entry) in &m.games {
                     if !seen_ids.contains(id) {
                         let display_name = id.clone();
-                        let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, id, sanitize_filename(id));
-                        let local_dir = local_dir.trim().to_string();
+                        let local_dir = get_game_local_backup_dir(id, id);
                         let info = Self::build_sync_info(
                             id, &display_name, &local_dir, &manifest,
                         );
@@ -182,6 +178,7 @@ impl UICloud {
         SyncGameInfo {
             title_id: title_id.to_string(),
             name: name.to_string(),
+            local_dir: local_dir.to_string(),
             status,
             local_time,
             cloud_time: cloud_data.map(|c| c.latest_version.clone()),
@@ -220,16 +217,13 @@ impl UICloud {
     }
 
     /// Upload a single game: find newest local zip, SHA256, POST to server.
-    fn upload_single(&self, title_id: &str, name: &str) {
+    fn upload_single(&self, game: &SyncGameInfo) {
         let config = Config::global();
         if !config.is_configured() {
             Toast::show("Configure server in Settings first.".to_string());
             return;
         }
-        let safe_name = sanitize_filename(name);
-        let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, title_id, safe_name);
-        let local_dir = local_dir.trim().to_string();
-        let zip_path = match Self::find_newest_zip(&local_dir) {
+        let zip_path = match Self::find_newest_zip(&game.local_dir) {
             Some(p) => p,
             None => {
                 Toast::show("No local backup to upload.".to_string());
@@ -244,8 +238,8 @@ impl UICloud {
             }
         };
         let ts = crate::ime::get_current_format_time().to_string();
-        let tid = title_id.to_string();
-        let n = name.to_string();
+        let tid = game.title_id.to_string();
+        let n = game.name.to_string();
         let pending = Arc::clone(&self.pending);
         let games = Arc::clone(&self.games);
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
@@ -267,20 +261,39 @@ impl UICloud {
         });
     }
 
+    /// A downloaded PSP archive also goes to SAVEDATA so Adrenaline and the
+    /// Games tab pick it up right away. Archives rooted inside the save folder
+    /// go straight into that folder, else their files would land loose in
+    /// SAVEDATA. Returns whether anything was extracted.
+    fn extract_psp_download(title_id: &str, dl_path: &str) -> bool {
+        match title_id.strip_prefix("PSP_") {
+            Some(game_id) => {
+                let extract_to = if is_grouped_archive(dl_path) {
+                    PSP_SAVE_DIR.to_string()
+                } else {
+                    format!("{}/{}", PSP_SAVE_DIR, game_id)
+                };
+                if let Err(e) = zip_extract(dl_path, &extract_to, None::<&[&str]>) {
+                    error!("extract {} to {} failed: {:?}", dl_path, extract_to, e);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Download a single game from server to local backup dir.
-    fn download_single(&self, title_id: &str, name: &str) {
+    fn download_single(&self, game: &SyncGameInfo) {
         let config = Config::global();
         if !config.is_configured() {
             Toast::show("Configure server in Settings first.".to_string());
             return;
         }
-        let safe_name = sanitize_filename(name);
-        let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, title_id, safe_name);
-        let local_dir = local_dir.trim().to_string();
+        let local_dir = game.local_dir.to_string();
         let _ = std::fs::create_dir_all(&local_dir);
         let dl_path = format!("{}/{}.zip", local_dir, crate::ime::get_current_format_time());
-        let tid = title_id.to_string();
-        let n = name.to_string();
+        let tid = game.title_id.to_string();
+        let n = game.name.to_string();
         let pending = Arc::clone(&self.pending);
         let games = Arc::clone(&self.games);
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
@@ -291,12 +304,7 @@ impl UICloud {
             let config = Config::global();
             match Api::download_save(&config, &tid, &dl_path) {
                 Ok(_) => {
-                    // For PSP saves, also extract to SAVEDATA so the
-                    // Games tab picks up the folders immediately.
-                    if tid.starts_with("PSP_") {
-                        let _ = zip_extract(
-                            &dl_path, PSP_SAVE_DIR, None::<&[&str]>,
-                        );
+                    if Self::extract_psp_download(&tid, &dl_path) {
                         Toast::show(format!("{} downloaded & extracted.", n));
                     } else {
                         Toast::show(format!("{} downloaded.", n));
@@ -317,13 +325,13 @@ impl UICloud {
         match game.status {
             SyncStatus::UploadNeeded | SyncStatus::LocalOnly => {
                 if game.has_local_backup {
-                    self.upload_single(&game.title_id, &game.name);
+                    self.upload_single(game);
                 } else {
                     Toast::show("No local backup. Create one in Games tab.".to_string());
                 }
             }
             SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => {
-                self.download_single(&game.title_id, &game.name);
+                self.download_single(game);
             }
             SyncStatus::Conflict => {
                 Toast::show("Conflict: resolve per-game in Games tab.".to_string());
@@ -342,15 +350,28 @@ impl UICloud {
         }
 
         let games = self.games.read().unwrap().clone();
+        // LocalOnly counts as pending upload: the cloud tab derives status from
+        // local-backup existence, so it never reports UploadNeeded and filtering
+        // on that alone left this phase unreachable.
         let upload_needed: Vec<_> = games
             .iter()
-            .filter(|g| g.status == SyncStatus::UploadNeeded && g.has_local_backup)
-            .map(|g| (g.title_id.clone(), g.name.clone()))
+            .filter(|g| {
+                config.upload_on_sync_all
+                    && matches!(g.status, SyncStatus::UploadNeeded | SyncStatus::LocalOnly)
+                    && g.has_local_backup
+            })
+            .cloned()
             .collect();
         let download_available: Vec<_> = games
             .iter()
-            .filter(|g| g.status == SyncStatus::DownloadAvailable)
-            .map(|g| (g.title_id.clone(), g.name.clone()))
+            .filter(|g| {
+                config.download_on_sync_all
+                    && matches!(
+                        g.status,
+                        SyncStatus::DownloadAvailable | SyncStatus::CloudOnly
+                    )
+            })
+            .cloned()
             .collect();
         let conflicts: Vec<_> = games
             .iter()
@@ -379,6 +400,8 @@ impl UICloud {
 
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
+        self.cancel.store(false, Ordering::Relaxed);
+        let cancel = Arc::clone(&self.cancel);
         Loading::show();
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
         let games_arc = Arc::clone(&self.games);
@@ -386,58 +409,76 @@ impl UICloud {
         tokio::spawn(async move {
             let config = Config::global();
             let mut ok = 0;
+            let mut cancelled = false;
             let mut failures: Vec<(String, String)> = Vec::new();
 
             // Upload phase
-            for (i, (title_id, name)) in upload_needed.iter().enumerate() {
+            for (i, game) in upload_needed.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+                // Both title and desc: the loading dialog stays hidden without
+                // a desc, leaving only a bare spinner on screen.
                 Loading::notify_title(format!(
-                    "Uploading ({}/{}) {}",
+                    "Uploading ({}/{})    {}",
                     i + 1,
                     upload_needed.len(),
-                    name
+                    CANCEL_HINT
                 ));
-                let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, title_id, name);
-                let local_dir = local_dir.trim().to_string();
-                if let Some(zip_path) = Self::find_newest_zip(&local_dir) {
-                    let hash = match sha256_file(&zip_path) {
-                        Ok(h) => h,
-                        Err(_) => {
-                            failures.push((title_id.clone(), "hash failed".to_string()));
-                            continue;
-                        }
-                    };
-                    let ts = crate::ime::get_current_format_time();
-                    match Api::upload_save(&config, title_id, &zip_path, &hash, &ts) {
-                        Ok(_) => ok += 1,
-                        Err(e) => {
-                            error!("upload {} failed: {}", title_id, e);
-                            failures.push((title_id.clone(), e));
-                        }
+                Loading::notify_desc(game.name.to_string());
+                let zip_path = match Self::find_newest_zip(&game.local_dir) {
+                    Some(path) => path,
+                    None => {
+                        failures.push((game.title_id.clone(), "no local backup".to_string()));
+                        continue;
+                    }
+                };
+                let hash = match sha256_file(&zip_path) {
+                    Ok(h) => h,
+                    Err(_) => {
+                        failures.push((game.title_id.clone(), "hash failed".to_string()));
+                        continue;
+                    }
+                };
+                let ts = crate::ime::get_current_format_time();
+                match Api::upload_save(&config, &game.title_id, &zip_path, &hash, &ts) {
+                    Ok(_) => ok += 1,
+                    Err(e) => {
+                        error!("upload {} failed: {}", game.title_id, e);
+                        failures.push((game.title_id.clone(), e));
                     }
                 }
             }
 
             // Download phase
-            for (i, (title_id, name)) in download_available.iter().enumerate() {
+            for (i, game) in download_available.iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
                 Loading::notify_title(format!(
-                    "Downloading ({}/{}) {}",
+                    "Downloading ({}/{})    {}",
                     i + 1,
                     download_available.len(),
-                    name
+                    CANCEL_HINT
                 ));
-                let local_dir = format!("{}/{} {}", GAME_SAVE_LOCAL_DIR, title_id, name);
-                let local_dir = local_dir.trim().to_string();
-                let _ = std::fs::create_dir_all(&local_dir);
+                Loading::notify_desc(game.name.to_string());
+                let _ = std::fs::create_dir_all(&game.local_dir);
                 let dl_path = format!(
                     "{}/{}.zip",
-                    local_dir,
+                    game.local_dir,
                     crate::ime::get_current_format_time()
                 );
-                match Api::download_save(&config, title_id, &dl_path) {
+                // Deliberately no extract here. Sync All is a bulk action, so it
+                // only fetches archives into the backup dir; writing them into
+                // SAVEDATA would overwrite live saves with no confirmation and
+                // no auto-backup. Restoring stays an explicit per-game choice.
+                match Api::download_save(&config, &game.title_id, &dl_path) {
                     Ok(_) => ok += 1,
                     Err(e) => {
-                        error!("download {} failed: {}", title_id, e);
-                        failures.push((title_id.clone(), e));
+                        error!("download {} failed: {}", game.title_id, e);
+                        failures.push((game.title_id.clone(), e));
                     }
                 }
             }
@@ -449,16 +490,23 @@ impl UICloud {
             }
 
             let fail_count = failures.len();
+            let head = if cancelled { "Sync stopped" } else { "Sync done" };
             let msg = if fail_count == 0 {
-                format!("Sync done: {} ok", ok)
+                format!("{}: {} ok", head, ok)
             } else if fail_count <= 2 {
                 let names: Vec<String> = failures
                     .iter()
                     .map(|(id, err)| format!("{}: {}", id, err))
                     .collect();
-                format!("Sync: {} ok, {} failed ({})", ok, fail_count, names.join(", "))
+                format!(
+                    "{}: {} ok, {} failed ({})",
+                    head,
+                    ok,
+                    fail_count,
+                    names.join(", ")
+                )
             } else {
-                format!("Sync: {} ok, {} failed", ok, fail_count)
+                format!("{}: {} ok, {} failed", head, ok, fail_count)
             };
             Toast::show(msg);
             Loading::hide();
@@ -539,18 +587,6 @@ impl UICloud {
     }
 }
 
-fn sanitize_filename(name: &str) -> String {
-    name.replace(':', "-")
-        .replace('/', "-")
-        .replace('\\', "-")
-        .replace('"', "")
-        .replace('<', "")
-        .replace('>', "")
-        .replace('|', "")
-        .replace('?', "")
-        .replace('*', "")
-}
-
 fn status_priority(status: &SyncStatus) -> i32 {
     match status {
         SyncStatus::Conflict => 4,
@@ -600,6 +636,13 @@ impl UIBase for UICloud {
         }
 
         if self.pending.load(Ordering::Relaxed) {
+            // Sync All holds all input, so circle is free to mean "stop".
+            // No confirmation dialog: it would block the main loop mid-run.
+            if is_button(buttons, SceCtrlButtons::SceCtrlCircle)
+                && !self.cancel.swap(true, Ordering::Relaxed)
+            {
+                Toast::show("Stopping after this game...".to_string());
+            }
             if !Loading::is_pending() {
                 self.pending.store(false, Ordering::Relaxed);
             }
