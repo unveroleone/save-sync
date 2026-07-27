@@ -12,6 +12,7 @@ use crate::{
     },
     tai::Title,
     ui::{ui_drawer::UIDrawer, ui_list::UIList},
+    utils::SaveTarget,
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_line, vita2d_text_height,
         vita2d_text_width, SceCtrlButtons,
@@ -27,7 +28,7 @@ pub struct SaveMenu {
     local: Option<Box<dyn UIList>>,
     cloud: Option<Box<dyn UIList>>,
     drawer: Option<UIDrawer>,
-    game_save_dir: Option<String>,
+    save_target: Option<SaveTarget>,
 }
 
 impl SaveMenu {
@@ -37,7 +38,7 @@ impl SaveMenu {
             local: None,
             cloud: None,
             drawer: None,
-            game_save_dir: None,
+            save_target: None,
         }
     }
 
@@ -45,10 +46,10 @@ impl SaveMenu {
         &mut self,
         title_id: &str,
         name: &str,
-        source_path: Option<String>,
+        save_target: Option<SaveTarget>,
         needs_pfs: bool,
     ) {
-        self.game_save_dir = source_path;
+        self.save_target = save_target;
         let config = Arc::new(RwLock::new(Config::global()));
         self.local = Some(Box::new(SaveListLocal::new(
             NEW_BACKUP,
@@ -100,17 +101,17 @@ impl SaveMenu {
     }
 
     pub fn open(&mut self, title: &Title) {
-        let mut source_path = None;
+        let mut save_target = None;
         for path in [
             format!("{}/{}", GAME_CARD_SAVE_DIR, title.real_id()),
             format!("{}/{}", GAME_SAVE_DIR, title.real_id()),
         ] {
             if Path::new(&path).exists() {
-                source_path = Some(path);
+                save_target = Some(SaveTarget::single(&path));
                 break;
             }
         }
-        self.open_for(title.title_id(), title.name(), source_path, true);
+        self.open_for(title.title_id(), title.name(), save_target, true);
     }
 
     pub fn close(&mut self) {
@@ -170,7 +171,7 @@ impl SaveMenu {
         } else {
             &mut self.cloud
         } {
-            save_list.update(&self.game_save_dir, buttons);
+            save_list.update(&self.save_target, buttons);
         }
     }
 

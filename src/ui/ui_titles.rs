@@ -448,14 +448,8 @@ impl UIBase for UITitles {
                         if let Some(entry) = self.emulator_entries.get(emu_idx) {
                             let id = entry.id.clone();
                             let name = entry.name.clone();
-                            // For PSP, use the parent SAVEDATA dir so multi-folder
-                            // zips from the desktop client extract correctly.
-                            let path = if entry.kind == EmulatorKind::Psp {
-                                crate::constant::PSP_SAVE_DIR.to_string()
-                            } else {
-                                entry.source_path.clone()
-                            };
-                            self.save_menu.open_for(&id, &name, Some(path), false);
+                            self.save_menu
+                                .open_for(&id, &name, Some(entry.save_target()), false);
                         }
                     }
                 } else if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {

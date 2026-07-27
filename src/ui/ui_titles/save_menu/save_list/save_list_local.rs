@@ -20,8 +20,8 @@ use crate::{
         ui_scroll_progress::ScrollProgress, ui_toast::Toast,
     },
     utils::{
-        backup_game_save, get_active_color, get_game_local_backup_dir, get_local_game_saves,
-        restore_game_save, sha256_file,
+        backup_save_target, get_active_color, get_game_local_backup_dir, get_local_game_saves,
+        restore_save_target, sha256_file, SaveTarget,
     },
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_set_clip, vita2d_text_width,
@@ -141,10 +141,10 @@ impl UIList for SaveListLocal {
         self.pending.load(Ordering::Relaxed)
     }
 
-    fn do_restore_game_save(&self, game_save_dir: &Option<String>, backup_name: &str) {
-        match &game_save_dir {
-            Some(game_save_dir) => {
-                let game_save_dir = game_save_dir.to_string();
+    fn do_restore_game_save(&self, save_target: &Option<SaveTarget>, backup_name: &str) {
+        match &save_target {
+            Some(save_target) => {
+                let save_target = save_target.clone();
                 let backup_path = format!("{}/{}", self.local_dir, backup_name);
                 let local_dir = self.local_dir();
                 let items = Arc::clone(&self.items);
@@ -152,11 +152,11 @@ impl UIList for SaveListLocal {
                 pending.store(true, Ordering::Relaxed);
                 Loading::show();
                 if self.needs_pfs {
-                    mount_pfs(&game_save_dir);
+                    mount_pfs(&save_target.restore_root);
                 }
                 tokio::spawn(async move {
                     Loading::notify_title("Restoring save...".to_string());
-                    match restore_game_save(&backup_path, &game_save_dir) {
+                    match restore_save_target(&save_target, &backup_path) {
                         Ok(_) => {
                             get_local_game_saves(local_dir, items);
                             Toast::show("Save restored!".to_string());
@@ -164,7 +164,7 @@ impl UIList for SaveListLocal {
                         Err(err) => {
                             error!(
                                 "extract zip {} to {} failed: {:?}",
-                                backup_path, game_save_dir, err
+                                backup_path, save_target.restore_root, err
                             );
                             Toast::show(format!("Restore failed: {}", err));
                         }
@@ -179,10 +179,10 @@ impl UIList for SaveListLocal {
         }
     }
 
-    fn do_backup_game_save(&self, game_save_dir: &Option<String>, input: Option<String>) {
-        match &game_save_dir {
-            Some(game_save_dir) => {
-                let game_save_dir = game_save_dir.to_string();
+    fn do_backup_game_save(&self, save_target: &Option<SaveTarget>, input: Option<String>) {
+        match &save_target {
+            Some(save_target) => {
+                let save_target = save_target.clone();
                 let backup_name = match &input {
                     Some(input) => format!("{}/{}", self.local_dir, input),
                     None => {
@@ -202,11 +202,11 @@ impl UIList for SaveListLocal {
                     pending.store(true, Ordering::Relaxed);
                     Loading::show();
                     if self.needs_pfs {
-                        mount_pfs(&game_save_dir);
+                        mount_pfs(&save_target.restore_root);
                     }
                     tokio::spawn(async move {
                         Loading::notify_title("Backing up...".to_string());
-                        match backup_game_save(&game_save_dir, &backup_name) {
+                        match backup_save_target(&save_target, &backup_name) {
                             Ok(_) => {
                                 get_local_game_saves(local_dir, items);
                                 Toast::show(if !is_overwrite {
@@ -218,7 +218,7 @@ impl UIList for SaveListLocal {
                             Err(err) => {
                                 error!(
                                     "zip {} to {} failed: {:?}",
-                                    game_save_dir, backup_name, err
+                                    save_target.restore_root, backup_name, err
                                 );
                                 Toast::show(format!("Backup failed: {}", err));
                             }
@@ -259,13 +259,13 @@ impl UIList for SaveListLocal {
         });
     }
 
-    fn update(&mut self, game_save_dir: &Option<String>, buttons: u32) {
+    fn update(&mut self, save_target: &Option<SaveTarget>, buttons: u32) {
         self.scroll_progress.update(buttons);
         let selected_idx = self.list_state.selected_idx;
         let idx = selected_idx - 1;
         if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
             if selected_idx == 0 {
-                self.do_backup_game_save(game_save_dir, None);
+                self.do_backup_game_save(save_target, None);
             } else {
                 let back_name = self
                     .get_items()
@@ -273,14 +273,14 @@ impl UIList for SaveListLocal {
                     .unwrap()
                     .to_string();
                 if UIDialog::present(&format!("Overwrite backup: {}?", back_name)) {
-                    self.do_backup_game_save(game_save_dir, Some(back_name));
+                    self.do_backup_game_save(save_target, Some(back_name));
                 }
             }
         } else if idx >= 0 {
             if is_button(buttons, SceCtrlButtons::SceCtrlSquare) {
                 let backup_name = &self.get_items().get(idx as usize).unwrap().to_owned();
                 if UIDialog::present(&format!("Restore save from backup: {}?", backup_name)) {
-                    self.do_restore_game_save(game_save_dir, backup_name);
+                    self.do_restore_game_save(save_target, backup_name);
                 }
             } else if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {
                 let backup_name = &self.get_items().get(idx as usize).unwrap().to_owned();

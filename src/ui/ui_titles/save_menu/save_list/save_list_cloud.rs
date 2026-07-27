@@ -20,8 +20,8 @@ use crate::{
         ui_scroll_progress::ScrollProgress, ui_toast::Toast,
     },
     utils::{
-        backup_game_save, delete_dir_if_empty, get_active_color, get_game_local_backup_dir,
-        restore_game_save, sha256_file,
+        backup_save_target, delete_dir_if_empty, get_active_color, get_game_local_backup_dir,
+        restore_save_target, sha256_file, SaveTarget,
     },
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, SceCtrlButtons,
@@ -129,11 +129,11 @@ impl SaveListCloud {
 
     fn upload_current_save(
         &self,
-        game_save_dir: &Option<String>,
+        save_target: &Option<SaveTarget>,
         input_overwrite: Option<String>,
     ) {
-        let game_save_dir = match game_save_dir {
-            Some(d) => d.clone(),
+        let save_target = match save_target {
+            Some(target) => target.clone(),
             None => {
                 Toast::show("No game save found!".to_string());
                 return;
@@ -165,11 +165,11 @@ impl SaveListCloud {
         pending.store(true, Ordering::Relaxed);
         Loading::show();
         if self.needs_pfs {
-            mount_pfs(&game_save_dir);
+            mount_pfs(&save_target.restore_root);
         }
         tokio::spawn(async move {
             Loading::notify_title("Backing up & uploading...".to_string());
-            match backup_game_save(&game_save_dir, &backup_path) {
+            match backup_save_target(&save_target, &backup_path) {
                 Ok(_) => {
                     let hash = match sha256_file(&backup_path) {
                         Ok(h) => h,
@@ -219,7 +219,7 @@ impl SaveListCloud {
         });
     }
 
-    fn download_from_server(&self, game_save_dir: &Option<String>, restore: bool) {
+    fn download_from_server(&self, save_target: &Option<SaveTarget>, restore: bool) {
         let config = Config::global();
         if !config.is_configured() {
             Toast::show("Configure server in Settings first.".to_string());
@@ -246,7 +246,7 @@ impl SaveListCloud {
 
         let title_id = self.title_id.clone();
         let local_dir = self.local_dir();
-        let game_save_dir = game_save_dir.clone();
+        let save_target = save_target.clone();
         let needs_pfs = self.needs_pfs;
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
@@ -265,12 +265,12 @@ impl SaveListCloud {
             match Api::download_save(&config, &title_id, &dl_path) {
                 Ok(_) => {
                     if restore {
-                        if let Some(ref gsd) = game_save_dir {
+                        if let Some(ref target) = save_target {
                             if needs_pfs {
-                                mount_pfs(gsd);
+                                mount_pfs(&target.restore_root);
                             }
                             Loading::notify_title("Restoring save...".to_string());
-                            match restore_game_save(&dl_path, gsd) {
+                            match restore_save_target(target, &dl_path) {
                                 Ok(_) => Toast::show("Save restored!".to_string()),
                                 Err(e) => {
                                     error!("restore failed: {:?}", e);
@@ -312,8 +312,8 @@ impl UIList for SaveListCloud {
         self.pending.load(Ordering::Relaxed)
     }
 
-    fn do_backup_game_save(&self, game_save_dir: &Option<String>, _input: Option<String>) {
-        self.upload_current_save(game_save_dir, None);
+    fn do_backup_game_save(&self, save_target: &Option<SaveTarget>, _input: Option<String>) {
+        self.upload_current_save(save_target, None);
     }
 
     fn do_delete_game_save(&self, _backup_name: &str) {
@@ -356,7 +356,7 @@ impl UIList for SaveListCloud {
         });
     }
 
-    fn update(&mut self, game_save_dir: &Option<String>, buttons: u32) {
+    fn update(&mut self, save_target: &Option<SaveTarget>, buttons: u32) {
         self.scroll_progress.update(buttons);
         let selected_idx = self.list_state.selected_idx;
 
@@ -364,14 +364,14 @@ impl UIList for SaveListCloud {
             if let Some(item) = self.get_cloud_item(selected_idx) {
                 match item {
                     CloudItem::UploadAction => {
-                        self.do_backup_game_save(game_save_dir, None);
+                        self.do_backup_game_save(save_target, None);
                     }
                     CloudItem::DownloadRestoreAction => {
-                        self.download_from_server(game_save_dir, true);
+                        self.download_from_server(save_target, true);
                     }
                     CloudItem::ServerBackup(_) => {
                         // ServerBackup row: selecting it does Download & Restore
-                        self.download_from_server(game_save_dir, true);
+                        self.download_from_server(save_target, true);
                     }
                 }
             }

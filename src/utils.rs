@@ -15,6 +15,7 @@ use zip::ZipWriter;
 
 use crate::{
     constant::{BACKUP_BLACK_LIST, GAME_SAVE_LOCAL_DIR, SAVE_CLOUD_DIR},
+    emulator::psp_title_prefix,
     ime::get_current_format_time,
     tai::{change_psv_account_id, get_psv_account_id},
     ui::ui_loading::Loading,
@@ -156,6 +157,88 @@ pub fn zip_dir(from: &str, to: &str, back_list: &[&str]) -> Result<(), Box<dyn E
     Ok(())
 }
 
+fn zip_dir_named(
+    zip: &mut ZipWriter<fs::File>,
+    input_path: &Path,
+    prefix: &str,
+    zip_base: &str,
+    back_list: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    let mut buffer = vec![0; 1024 * 512];
+    for entry in input_path.read_dir()? {
+        if let Ok(entry) = entry {
+            let path = entry.path();
+            let relative = path.strip_prefix(Path::new(prefix))?;
+            let relative = relative.to_string_lossy().to_string();
+            if relative.is_empty() {
+                continue;
+            }
+            if back_list.iter().any(|&x| x == relative) {
+                continue;
+            }
+            let name = if zip_base.is_empty() {
+                relative
+            } else {
+                format!("{}/{}", zip_base, relative)
+            };
+            Loading::notify_desc(entry.file_name().to_string_lossy().to_string());
+            if path.is_file() {
+                zip.start_file(&name, options)?;
+                let mut input_file = fs::File::open(path)?;
+                loop {
+                    let size = input_file.read(&mut buffer)?;
+                    if size == 0 {
+                        break;
+                    }
+                    zip.write_all(&buffer[0..size])?;
+                }
+            } else {
+                zip.add_directory(format!("{}/", name), options)?;
+                zip_dir_named(zip, path.as_path(), prefix, zip_base, back_list)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Zip several directories into one archive, each stored under its own folder
+/// name. `sources` holds `(zip_folder_name, fs_path)` pairs; an empty folder
+/// name stores that directory's contents at the archive root.
+pub fn zip_dirs(
+    sources: &[(String, String)],
+    to: &str,
+    back_list: &[&str],
+) -> Result<(), Box<dyn Error>> {
+    let output_path = Path::new(to);
+    if let Some(parent) = output_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    let mut zip = zip::ZipWriter::new(fs::File::create(output_path)?);
+    let options =
+        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (folder_name, dir_path) in sources {
+        if !Path::new(dir_path).is_dir() {
+            continue;
+        }
+        let root = if dir_path.ends_with("/") {
+            dir_path.to_string()
+        } else {
+            format!("{}/", dir_path)
+        };
+        if !folder_name.is_empty() {
+            zip.add_directory(format!("{}/", folder_name), options)?;
+        }
+        zip_dir_named(&mut zip, Path::new(&root), &root, folder_name, back_list)?;
+    }
+    zip.finish()?;
+    Ok(())
+}
+
 pub fn zip_file(from: &str, name: &str, to: &str) -> Result<(), Box<dyn Error>> {
     let from_path = Path::new(from).join(name);
     let mut zip = zip::ZipWriter::new(fs::File::create(to)?);
@@ -260,18 +343,179 @@ pub fn backup_game_save(from: &str, to: &str) -> Result<(), Box<dyn Error>> {
     zip_dir(from, to, &BACKUP_BLACK_LIST)
 }
 
-pub fn restore_game_save(from: &str, to: &str) -> Result<(), Box<dyn Error>> {
+/// What a save is made of: the directories to archive and where a restore puts
+/// them back. Native saves live in one directory and use it for both, while a
+/// PSP game can own several sibling folders under a shared parent.
+#[derive(Debug, Clone)]
+pub struct SaveTarget {
+    /// `(zip_folder_name, fs_path)` pairs. An empty folder name stores that
+    /// directory's contents at the archive root.
+    pub sources: Vec<(String, String)>,
+    /// Directory a restore extracts into.
+    pub restore_root: String,
+}
+
+impl SaveTarget {
+    /// A save held in a single directory, archived at the root of the zip.
+    pub fn single(path: &str) -> SaveTarget {
+        SaveTarget {
+            sources: vec![(String::new(), path.to_string())],
+            restore_root: path.to_string(),
+        }
+    }
+
+    /// A save spread over sibling folders below `restore_root`. Each folder is
+    /// archived under its own name so the zip stays rooted at the parent and
+    /// extracts back into place.
+    pub fn grouped(paths: &[String], restore_root: &str) -> SaveTarget {
+        let mut sources: Vec<(String, String)> = paths
+            .iter()
+            .map(|path| {
+                let name = Path::new(path)
+                    .file_name()
+                    .unwrap_or(OsStr::new(""))
+                    .to_string_lossy()
+                    .to_string();
+                (name, path.to_string())
+            })
+            .collect();
+        // Sorted so the plain title-id folder comes before its suffixed
+        // siblings, making it the primary. Scanning prefers the PROFILE folder
+        // for the icon, which is the wrong pick to fall back to on restore.
+        sources.sort();
+        SaveTarget {
+            sources,
+            restore_root: restore_root.to_string(),
+        }
+    }
+
+    /// Primary source directory, used when an archive turns out to be rooted
+    /// inside the save folder rather than at its parent.
+    pub fn primary_source(&self) -> &str {
+        self.sources
+            .first()
+            .map(|(_, path)| path.as_str())
+            .unwrap_or(&self.restore_root)
+    }
+
+    fn is_rooted_at_contents(&self) -> bool {
+        self.sources.len() == 1 && self.sources[0].0.is_empty()
+    }
+}
+
+/// True when the archive's top level holds save folders, meaning it belongs in
+/// the shared parent directory. False for archives rooted inside a single game
+/// folder, which some desktop client versions produce.
+pub fn is_grouped_archive(from: &str) -> bool {
+    let file = match fs::File::open(from) {
+        Ok(file) => file,
+        Err(_) => return true,
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(zip) => zip,
+        Err(_) => return true,
+    };
+    for i in 0..zip.len() {
+        let name = match zip.by_index(i) {
+            Ok(entry) => entry.name().to_string(),
+            Err(_) => continue,
+        };
+        // Only a name with a separator proves the top segment is a directory.
+        if !name.contains('/') {
+            continue;
+        }
+        if let Some(top) = name.split('/').next() {
+            if psp_title_prefix(top).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Directory an archive should be extracted into. A grouped target normally
+/// restores to its shared parent, but a game-rooted archive has to go straight
+/// into the save folder instead.
+pub fn restore_root_for(target: &SaveTarget, from: &str) -> String {
+    if target.is_rooted_at_contents() || is_grouped_archive(from) {
+        target.restore_root.to_string()
+    } else {
+        target.primary_source().to_string()
+    }
+}
+
+pub fn backup_save_target(target: &SaveTarget, to: &str) -> Result<(), Box<dyn Error>> {
+    if target.is_rooted_at_contents() {
+        zip_dir(&target.sources[0].1, to, &BACKUP_BLACK_LIST)
+    } else {
+        zip_dirs(&target.sources, to, &BACKUP_BLACK_LIST)
+    }
+}
+
+/// Top-level directory names an archive will write into.
+fn archive_top_level_dirs(from: &str) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    let file = match fs::File::open(from) {
+        Ok(file) => file,
+        Err(_) => return dirs,
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(zip) => zip,
+        Err(_) => return dirs,
+    };
+    for i in 0..zip.len() {
+        let name = match zip.by_index(i) {
+            Ok(entry) => entry.name().to_string(),
+            Err(_) => continue,
+        };
+        if !name.contains('/') {
+            continue;
+        }
+        if let Some(top) = name.split('/').next() {
+            if !top.is_empty() && !dirs.iter().any(|d| d == top) {
+                dirs.push(top.to_string());
+            }
+        }
+    }
+    dirs
+}
+
+/// What the auto-backup has to cover: the save itself, plus any other folder
+/// the archive is about to overwrite. Archives written before saves were
+/// scoped per game hold every game, and losing the bystanders is not
+/// recoverable otherwise.
+fn overwrite_scope(target: &SaveTarget, from: &str, to: &str) -> SaveTarget {
+    let mut sources = target.sources.clone();
+    if to == target.restore_root {
+        for dir in archive_top_level_dirs(from) {
+            if sources.iter().any(|(name, _)| name == &dir) {
+                continue;
+            }
+            let path = format!("{}/{}", target.restore_root, dir);
+            if Path::new(&path).is_dir() {
+                sources.push((dir, path));
+            }
+        }
+    }
+    SaveTarget {
+        sources,
+        restore_root: target.restore_root.to_string(),
+    }
+}
+
+pub fn restore_save_target(target: &SaveTarget, from: &str) -> Result<(), Box<dyn Error>> {
+    let to = restore_root_for(target, from);
     if let Some(from_parent) = Path::new(from).parent() {
         if let Some(auto_backup_path) = from_parent
             .join(&format!("{} auto.zip", get_current_format_time()))
             .to_str()
         {
             Loading::notify_title("Auto-backing up...".to_string());
-            let _ = backup_game_save(to, auto_backup_path);
+            let _ = backup_save_target(&overwrite_scope(target, from, &to), auto_backup_path);
         }
     }
     Loading::notify_title("Restoring save...".to_string());
-    let mut res = zip_extract(from, to, Some(&BACKUP_BLACK_LIST));
+    let mut res = zip_extract(from, &to, Some(&BACKUP_BLACK_LIST));
     if res.is_ok() {
         let sfo_path = format!("{}/sce_sys/param.sfo", to);
         res = update_sfo_file_with_current_account_id(&sfo_path);
