@@ -1,6 +1,27 @@
-use std::env;
+use std::{env, fs, path::Path};
+
+/// cargo-vita packages everything under assets/, so Finder's .DS_Store files
+/// end up inside the VPK. They are gitignored and never reach CI, but a local
+/// macOS build picks them up. Runs before packaging, so clearing them here
+/// keeps them out of the bundle.
+fn remove_ds_store(dir: &Path) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_ds_store(&path);
+        } else if path.file_name().is_some_and(|name| name == ".DS_Store") {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
 
 fn main() {
+    remove_ds_store(Path::new("assets"));
+
     let vitasdk = env::var("VITASDK").unwrap_or_else(|_| "/usr/local/vitasdk".to_string());
     // cc crate picks up TARGET_AR from env; set it if not already provided
     if env::var("TARGET_AR").is_err() {
