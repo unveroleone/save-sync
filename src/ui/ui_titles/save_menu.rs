@@ -46,6 +46,7 @@ impl SaveMenu {
         &mut self,
         title_id: &str,
         name: &str,
+        server_title: &str,
         save_target: Option<SaveTarget>,
         needs_pfs: bool,
     ) {
@@ -55,6 +56,7 @@ impl SaveMenu {
             NEW_BACKUP,
             title_id,
             name,
+            server_title,
             needs_pfs,
             Arc::clone(&config),
         )));
@@ -62,6 +64,7 @@ impl SaveMenu {
             NEW_CLOUD_BACKUP,
             title_id,
             name,
+            server_title,
             needs_pfs,
             config,
         )));
@@ -111,7 +114,7 @@ impl SaveMenu {
                 break;
             }
         }
-        self.open_for(title.title_id(), title.name(), save_target, true);
+        self.open_for(title.title_id(), title.name(), title.name(), save_target, true);
     }
 
     pub fn close(&mut self) {

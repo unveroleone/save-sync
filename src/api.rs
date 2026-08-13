@@ -7,6 +7,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 
+/// Encode a save identifier for use as a URL path segment. Ids are derived
+/// from filesystem names (RetroArch ROM names), so they can contain spaces
+/// and other URL-hostile bytes. Non-ASCII bytes pass through percent-encoded;
+/// Fastify decodes the segment back on the server.
+fn url_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Deserialize)]
 pub struct StatusResponse {
     pub ok: bool,
@@ -44,6 +61,10 @@ pub struct CloudGameEntry {
     pub size: u64,
     #[serde(rename = "versionCount", default)]
     pub version_count: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(rename = "contentHash", default)]
+    pub content_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,11 +146,13 @@ impl Api {
     pub fn upload_save(
         config: &Config,
         title_id: &str,
+        title: &str,
+        content_hash: &str,
         zip_path: &str,
         hash: &str,
         timestamp: &str,
     ) -> Result<UploadResponse, String> {
-        let url = Api::build_url(config, &format!("/api/save/{}", title_id));
+        let url = Api::build_url(config, &format!("/api/save/{}", url_segment(title_id)));
         let file_data = fs::read(zip_path).map_err(|e| format!("Read file failed: {}", e))?;
 
         let boundary = format!("VitaSaveSync{}", std::process::id());
@@ -149,14 +172,24 @@ impl Api {
         body.extend_from_slice(&file_data);
         body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
 
-        let response = ureq::put(&url)
+        let mut request = ureq::put(&url)
             .set("Authorization", &Api::auth_value(config))
             .set("Content-Type", &format!("multipart/form-data; boundary={}", boundary))
             .set("X-Device-Id", &config.device_name)
             .set("X-Save-Hash", hash)
-            .set("X-Save-Timestamp", timestamp)
-            .send_bytes(&body)
-            .map_err(|e| format!("Upload failed: {}", e))?;
+            .set("X-Save-Timestamp", timestamp);
+        // Game name for the server-side folder label, base64 so non-ASCII
+        // titles survive the trip through HTTP headers.
+        if !title.is_empty() {
+            request = request.set("X-Save-Title", &crate::utils::base64_encode(title.as_bytes()));
+        }
+        // Canonical content hash so status checks can compare saves across
+        // devices (empty for backups from older builds).
+        if !content_hash.is_empty() {
+            request = request.set("X-Content-Hash", content_hash);
+        }
+
+        let response = request.send_bytes(&body).map_err(|e| format!("Upload failed: {}", e))?;
 
         let status = response.status();
         let resp_body = response
@@ -171,7 +204,7 @@ impl Api {
     }
 
     pub fn download_save(config: &Config, title_id: &str, dest_path: &str) -> Result<(), String> {
-        let url = Api::build_url(config, &format!("/api/save/{}", title_id));
+        let url = Api::build_url(config, &format!("/api/save/{}", url_segment(title_id)));
         let response = ureq::get(&url)
             .set("Authorization", &Api::auth_value(config))
             .call()
@@ -205,7 +238,7 @@ impl Api {
     }
 
     pub fn delete_save(config: &Config, title_id: &str) -> Result<(), String> {
-        let url = Api::build_url(config, &format!("/api/save/{}", title_id));
+        let url = Api::build_url(config, &format!("/api/save/{}", url_segment(title_id)));
         let response = ureq::delete(&url)
             .set("Authorization", &Api::auth_value(config))
             .call()

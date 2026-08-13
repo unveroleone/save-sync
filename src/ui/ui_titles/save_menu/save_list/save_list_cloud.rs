@@ -21,7 +21,7 @@ use crate::{
     },
     utils::{
         backup_save_target, delete_dir_if_empty, get_active_color, get_game_local_backup_dir,
-        restore_save_target, sha256_file, SaveTarget,
+        read_content_hash_sidecar, restore_save_target, sha256_file, SaveTarget,
     },
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, SceCtrlButtons,
@@ -51,6 +51,8 @@ pub struct SaveListCloud {
     local_dir: String,
     title_id: String,
     title_name: String,
+    /// Title sent to the server so backups there are labelled with the game name.
+    server_title: String,
     needs_pfs: bool,
     new_backup_text: &'static str,
     scroll_progress: ScrollProgress,
@@ -63,6 +65,7 @@ impl SaveListCloud {
         new_backup_text: &'static str,
         title_id: &str,
         title_name: &str,
+        server_title: &str,
         needs_pfs: bool,
         config: Arc<RwLock<Config>>,
     ) -> SaveListCloud {
@@ -72,6 +75,7 @@ impl SaveListCloud {
             local_dir: get_game_local_backup_dir(title_id, title_name),
             title_id: title_id.to_string(),
             title_name: title_name.to_string(),
+            server_title: server_title.to_string(),
             needs_pfs,
             new_backup_text,
             scroll_progress: ScrollProgress::new(40.0, 100.0),
@@ -153,6 +157,7 @@ impl SaveListCloud {
         };
         let backup_path = format!("{}/{}", local_dir, backup_name);
         let title_id = self.title_id.clone();
+        let server_title = self.server_title.clone();
         let cloud_entry = Arc::clone(&self.cloud_entry);
         let config = Config::global();
 
@@ -181,10 +186,13 @@ impl SaveListCloud {
                         }
                     };
                     let timestamp = get_current_format_time();
+                    let content_hash = read_content_hash_sidecar(&backup_path).unwrap_or_default();
 
                     match Api::upload_save(
                         &config,
                         &title_id,
+                        &server_title,
+                        &content_hash,
                         &backup_path,
                         &hash,
                         &timestamp,
@@ -196,6 +204,7 @@ impl SaveListCloud {
                                     *cloud_entry.write().unwrap() = Some(entry.clone());
                                 }
                             }
+                            crate::sync::LocalManifest::record(&title_id, &content_hash);
                             Toast::show("Upload complete!".to_string());
                         }
                         Err(e) => {
@@ -246,6 +255,9 @@ impl SaveListCloud {
 
         let title_id = self.title_id.clone();
         let local_dir = self.local_dir();
+        // Server's content hash for this save, stamped onto the downloaded
+        // zip so the next cloud-tab scan compares instead of falling back.
+        let cloud_content = entry.content_hash.clone();
         let save_target = save_target.clone();
         let needs_pfs = self.needs_pfs;
         let pending = Arc::clone(&self.pending);
@@ -264,6 +276,10 @@ impl SaveListCloud {
 
             match Api::download_save(&config, &title_id, &dl_path) {
                 Ok(_) => {
+                    if let Some(ch) = cloud_content {
+                        let _ = std::fs::write(format!("{}.chash", dl_path), &ch);
+                        crate::sync::LocalManifest::record(&title_id, &ch);
+                    }
                     if restore {
                         if let Some(ref target) = save_target {
                             if needs_pfs {

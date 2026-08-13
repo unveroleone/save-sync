@@ -46,6 +46,21 @@ impl LocalManifest {
             let _ = fs::write(LOCAL_MANIFEST_PATH, json);
         }
     }
+
+    /// Mark a game as synced at the given content hash after a successful
+    /// upload or download. Both sides are equal at that moment.
+    pub fn record(title: &str, content_hash: &str) {
+        if content_hash.is_empty() {
+            return;
+        }
+        let mut manifest = LocalManifest::load();
+        let entry = manifest.games.entry(title.to_string()).or_default();
+        entry.local_hash = Some(content_hash.to_string());
+        entry.cloud_hash = Some(content_hash.to_string());
+        entry.last_synced_hash = Some(content_hash.to_string());
+        manifest.updated_at = crate::utils::current_time().to_string();
+        manifest.save();
+    }
 }
 
 pub fn compute_status(entry: &GameSyncEntry) -> SyncStatus {

@@ -1,5 +1,6 @@
 use crate::{
-    constant::ACTION_DRAWER_BOTTOM_BAR_TEXT,
+    constant::{ACTION_DRAWER_BOTTOM_BAR_TEXT, FOLDER_PICKER_BOTTOM_BAR_TEXT},
+    emulator::EmulatorEntry,
     tai::{Title, Titles},
     ui::ui_drawer::UIDrawer,
     vita2d::{is_button, SceCtrlButtons},
@@ -47,6 +48,16 @@ impl GameMenu {
     }
 
     pub fn open(&mut self) {
+        self.list.set_native();
+        self.open_drawer();
+    }
+
+    pub fn open_emulator(&mut self, entry: &EmulatorEntry) {
+        self.list.set_emulator(entry);
+        self.open_drawer();
+    }
+
+    fn open_drawer(&mut self) {
         if self.drawer.is_none() {
             self.drawer = Some(UIDrawer::new());
         }
@@ -61,11 +72,22 @@ impl GameMenu {
         }
     }
 
-    pub fn update(&mut self, buttons: u32, title: &Title, titles: &Titles) {
-        if !self.is_pending() && is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+    pub fn update(
+        &mut self,
+        buttons: u32,
+        title: Option<&Title>,
+        titles: &Titles,
+        emu: Option<&EmulatorEntry>,
+    ) {
+        // While the folder picker is up, circle means "save the picker", not
+        // "close the menu".
+        if !self.is_pending()
+            && is_button(buttons, SceCtrlButtons::SceCtrlCircle)
+            && !self.list.picker_active()
+        {
             self.close();
         } else {
-            self.list.update(buttons, title, titles);
+            self.list.update(buttons, title, titles, emu);
         }
     }
 
@@ -75,8 +97,13 @@ impl GameMenu {
         }
         if let Some(drawer) = &self.drawer {
             let left = drawer.get_progress_left() as i32;
+            let bar_text = if self.list.picker_active() {
+                FOLDER_PICKER_BOTTOM_BAR_TEXT
+            } else {
+                ACTION_DRAWER_BOTTOM_BAR_TEXT
+            };
             // drawer
-            drawer.draw(ACTION_DRAWER_BOTTOM_BAR_TEXT);
+            drawer.draw(bar_text);
             self.list.draw(left, 0);
         }
     }

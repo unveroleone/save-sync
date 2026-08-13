@@ -21,7 +21,7 @@ use crate::{
     },
     utils::{
         backup_save_target, get_active_color, get_game_local_backup_dir, get_local_game_saves,
-        restore_save_target, sha256_file, SaveTarget,
+        read_content_hash_sidecar, restore_save_target, sha256_file, SaveTarget,
     },
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_set_clip, vita2d_text_width,
@@ -37,6 +37,8 @@ pub struct SaveListLocal {
     local_dir: String,
     title_id: String,
     title_name: String,
+    /// Title sent to the server so backups there are labelled with the game name.
+    server_title: String,
     needs_pfs: bool,
     items: Arc<RwLock<Vec<String>>>,
     new_backup_text: &'static str,
@@ -49,6 +51,7 @@ impl SaveListLocal {
         new_back: &'static str,
         title_id: &str,
         title_name: &str,
+        server_title: &str,
         needs_pfs: bool,
         config: Arc<RwLock<Config>>,
     ) -> SaveListLocal {
@@ -58,6 +61,7 @@ impl SaveListLocal {
             local_dir: get_game_local_backup_dir(title_id, title_name),
             title_id: title_id.to_string(),
             title_name: title_name.to_string(),
+            server_title: server_title.to_string(),
             needs_pfs,
             items: Arc::new(RwLock::new(vec![])),
             new_backup_text: new_back,
@@ -92,6 +96,7 @@ impl SaveListLocal {
         }
 
         let title_id = self.title_id.clone();
+        let server_title = self.server_title.clone();
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
         Loading::show();
@@ -109,9 +114,19 @@ impl SaveListLocal {
                 }
             };
             let timestamp = get_current_format_time();
+            let content_hash = read_content_hash_sidecar(&local_backup_path).unwrap_or_default();
 
-            match Api::upload_save(&config, &title_id, &local_backup_path, &hash, &timestamp) {
+            match Api::upload_save(
+                &config,
+                &title_id,
+                &server_title,
+                &content_hash,
+                &local_backup_path,
+                &hash,
+                &timestamp,
+            ) {
                 Ok(_resp) => {
+                    crate::sync::LocalManifest::record(&title_id, &content_hash);
                     Toast::show("Upload complete!".to_string());
                 }
                 Err(e) => {

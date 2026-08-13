@@ -50,4 +50,11 @@ impl ListState {
             self.do_scroll(size, buttons);
         }
     }
+
+    /// Back to the first row. Call after swapping the backing list, or an
+    /// index from the longer list can outlive it and index out of bounds.
+    pub fn reset(&mut self) {
+        self.top_row = 0;
+        self.selected_idx = 0;
+    }
 }

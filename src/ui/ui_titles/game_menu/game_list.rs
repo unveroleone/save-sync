@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     fmt::{Display, Formatter},
     fs,
     ops::Deref,
@@ -15,7 +16,7 @@ use crate::{
     api::Api,
     config::Config,
     constant::{CANCEL_HINT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR, SCREEN_WIDTH},
-    emulator::scan_emulator_entries,
+    emulator::{scan_emulator_entries, EmulatorEntry, EmulatorKind},
     ime::get_current_format_time,
     tai::{mount_pfs, psv_launch_app_by_title_id, unmount_pfs, Title, Titles},
     ui::{
@@ -23,7 +24,7 @@ use crate::{
     },
     utils::{
         backup_game_save, backup_save_target, get_active_color, get_game_local_backup_dir,
-        sha256_file, update_sfo_file_with_current_account_id,
+        read_content_hash_sidecar, sha256_file, update_sfo_file_with_current_account_id,
     },
     vita2d::{is_button, rgba, vita2d_draw_rect, vita2d_draw_text, SceCtrlButtons},
 };
@@ -36,6 +37,7 @@ enum GameMenuAction {
     DeleteGameSave,
     DeleteSelectedGameSave,
     DeleteAllGameSaves,
+    SelectFolders,
 }
 
 impl Deref for GameMenuAction {
@@ -50,6 +52,7 @@ impl Deref for GameMenuAction {
             GameMenuAction::DeleteGameSave => "Delete Game Save",
             GameMenuAction::DeleteSelectedGameSave => "Delete Local Backup",
             GameMenuAction::DeleteAllGameSaves => "Delete All Local Backups",
+            GameMenuAction::SelectFolders => "Select Folders",
         }
     }
 }
@@ -111,8 +114,9 @@ fn wait_for_mount(
 }
 
 /// Hash and upload one finished backup. Failures are logged and reported to the
-/// caller so a bulk run can keep going.
-fn upload_backup(config: &Config, title_id: &str, backup_path: &str) -> bool {
+/// caller so a bulk run can keep going. `title` labels the save on the server
+/// (empty skips the label).
+fn upload_backup(config: &Config, title_id: &str, title: &str, backup_path: &str) -> bool {
     let hash = match sha256_file(backup_path) {
         Ok(hash) => hash,
         Err(err) => {
@@ -121,8 +125,20 @@ fn upload_backup(config: &Config, title_id: &str, backup_path: &str) -> bool {
         }
     };
     let timestamp = get_current_format_time();
-    match Api::upload_save(config, title_id, backup_path, &hash, &timestamp) {
-        Ok(_) => true,
+    let content_hash = read_content_hash_sidecar(backup_path).unwrap_or_default();
+    match Api::upload_save(
+        config,
+        title_id,
+        title,
+        &content_hash,
+        backup_path,
+        &hash,
+        &timestamp,
+    ) {
+        Ok(_) => {
+            crate::sync::LocalManifest::record(title_id, &content_hash);
+            true
+        }
         Err(err) => {
             error!("upload {} failed: {}", title_id, err);
             false
@@ -130,10 +146,22 @@ fn upload_backup(config: &Config, title_id: &str, backup_path: &str) -> bool {
     }
 }
 
+/// Whose save the menu was opened for. Native titles get the full action set,
+/// while emulator entries (PSP/RetroArch) get the subset that makes sense for
+/// them: backup, backup+upload, and local-backup deletion.
+enum GameListMode {
+    Native,
+    Emulator(EmulatorEntry),
+}
+
 pub struct GameList {
     pending: Arc<AtomicBool>,
     list_state: ListState,
-    list: [GameMenuAction; 7],
+    list: Vec<GameMenuAction>,
+    mode: GameListMode,
+    /// Active folder picker: (folder name, included). PSP entries with more
+    /// than one folder can exclude install/DLC data from backups.
+    folder_picker: Option<Vec<(String, bool)>>,
     game_save_dir_prepare_to_mount: Arc<RwLock<Option<String>>>,
     game_save_dir_on_mounted: Arc<RwLock<Option<String>>>,
     cancel: Arc<AtomicBool>,
@@ -141,22 +169,58 @@ pub struct GameList {
 
 impl GameList {
     pub fn new() -> Self {
-        GameList {
+        let mut list = GameList {
             pending: Arc::new(AtomicBool::new(false)),
             list_state: ListState::new(15),
-            list: [
-                GameMenuAction::LaunchApp,
-                GameMenuAction::BackupAllGameSave,
-                GameMenuAction::BackupAllToServer,
-                GameMenuAction::UpdateAccountId,
-                GameMenuAction::DeleteGameSave,
-                GameMenuAction::DeleteSelectedGameSave,
-                GameMenuAction::DeleteAllGameSaves,
-            ],
+            list: Vec::new(),
+            mode: GameListMode::Native,
+            folder_picker: None,
             game_save_dir_prepare_to_mount: Arc::new(RwLock::new(None)),
             game_save_dir_on_mounted: Arc::new(RwLock::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
+        };
+        list.set_native();
+        list
+    }
+
+    /// Native action set, including the whole-device bulk operations.
+    pub fn set_native(&mut self) {
+        self.mode = GameListMode::Native;
+        self.list = vec![
+            GameMenuAction::LaunchApp,
+            GameMenuAction::BackupAllGameSave,
+            GameMenuAction::BackupAllToServer,
+            GameMenuAction::UpdateAccountId,
+            GameMenuAction::DeleteGameSave,
+            GameMenuAction::DeleteSelectedGameSave,
+            GameMenuAction::DeleteAllGameSaves,
+        ];
+        self.folder_picker = None;
+        self.list_state.reset();
+    }
+
+    /// Emulator action set. LaunchApp and UpdateAccountId are native-only, and
+    /// the whole-device delete operations would surprise from a single PSP or
+    /// RetroArch entry.
+    pub fn set_emulator(&mut self, entry: &EmulatorEntry) {
+        self.mode = GameListMode::Emulator(entry.clone());
+        let mut actions = vec![
+            GameMenuAction::BackupAllGameSave,
+            GameMenuAction::BackupAllToServer,
+            GameMenuAction::DeleteSelectedGameSave,
+        ];
+        // The folder picker only makes sense when a PSP game owns several
+        // folders (save slots + DLC/install data).
+        if entry.kind == EmulatorKind::Psp && entry.all_paths().len() > 1 {
+            actions.push(GameMenuAction::SelectFolders);
         }
+        self.list = actions;
+        self.folder_picker = None;
+        self.list_state.reset();
+    }
+
+    pub fn picker_active(&self) -> bool {
+        self.folder_picker.is_some()
     }
 
     /// Ask a running bulk operation to stop. There is no confirmation dialog:
@@ -418,7 +482,7 @@ impl GameList {
                     );
                     continue;
                 }
-                if upload_backup(&config, title_id, &backup_to_path) {
+                if upload_backup(&config, title_id, name, &backup_to_path) {
                     uploaded += 1;
                 } else {
                     failed += 1;
@@ -439,12 +503,15 @@ impl GameList {
                     entry.local_backup_dir(),
                     get_current_format_time()
                 );
-                if let Err(err) = backup_save_target(&entry.save_target(), &backup_to_path) {
+                let exclusions = Config::global().psp_exclusions_for(&entry.id);
+                if let Err(err) =
+                    backup_save_target(&entry.save_target_excluding(&exclusions), &backup_to_path)
+                {
                     failed += 1;
                     error!("zip {} to {} failed: {:?}", entry.id, backup_to_path, err);
                     continue;
                 }
-                if upload_backup(&config, &entry.id, &backup_to_path) {
+                if upload_backup(&config, &entry.id, &entry.server_title, &backup_to_path) {
                     uploaded += 1;
                 } else {
                     failed += 1;
@@ -452,6 +519,92 @@ impl GameList {
             }
 
             Toast::show(bulk_result_message("uploaded", uploaded, failed, cancelled));
+            Loading::hide();
+            pending.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Back up a single emulator entry (PSP game / RetroArch save) to its
+    /// local backup directory. No PFS mount: emulator saves live on plain
+    /// ux0 paths.
+    fn backup_emulator_to_local(&self, entry: &EmulatorEntry) {
+        let entry = entry.clone();
+        let exclusions = Config::global().psp_exclusions_for(&entry.id);
+        let pending = Arc::clone(&self.pending);
+        pending.store(true, Ordering::Relaxed);
+        Loading::show();
+        tokio::spawn(async move {
+            let backup_to_path = format!(
+                "{}/{}.zip",
+                entry.local_backup_dir(),
+                get_current_format_time()
+            );
+            match backup_save_target(&entry.save_target_excluding(&exclusions), &backup_to_path) {
+                Ok(_) => Toast::show(format!("{} backed up.", entry.name)),
+                Err(err) => {
+                    error!("zip {} to {} failed: {:?}", entry.id, backup_to_path, err);
+                    Toast::show(format!("Backup failed for {}!", entry.name));
+                }
+            }
+            Loading::hide();
+            pending.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Back up a single emulator entry and push it to the server.
+    fn backup_emulator_to_server(&self, entry: &EmulatorEntry) {
+        let config = Config::global();
+        if !config.is_configured() {
+            Toast::show("Configure server in Settings first.".to_string());
+            return;
+        }
+        let entry = entry.clone();
+        let exclusions = Config::global().psp_exclusions_for(&entry.id);
+        let pending = Arc::clone(&self.pending);
+        pending.store(true, Ordering::Relaxed);
+        Loading::show();
+        tokio::spawn(async move {
+            let backup_to_path = format!(
+                "{}/{}.zip",
+                entry.local_backup_dir(),
+                get_current_format_time()
+            );
+            match backup_save_target(&entry.save_target_excluding(&exclusions), &backup_to_path) {
+                Ok(_) => {
+                    if !upload_backup(&config, &entry.id, &entry.server_title, &backup_to_path) {
+                        Toast::show(format!("Upload failed for {}!", entry.name));
+                    } else {
+                        Toast::show(format!("{} uploaded.", entry.name));
+                    }
+                }
+                Err(err) => {
+                    error!("zip {} to {} failed: {:?}", entry.id, backup_to_path, err);
+                    Toast::show(format!("Backup failed for {}!", entry.name));
+                }
+            }
+            Loading::hide();
+            pending.store(false, Ordering::Relaxed);
+        });
+    }
+
+    /// Delete every local backup of one emulator entry.
+    fn delete_emulator_backups(&self, entry: &EmulatorEntry) {
+        let entry = entry.clone();
+        let pending = Arc::clone(&self.pending);
+        pending.store(true, Ordering::Relaxed);
+        Loading::show();
+        tokio::spawn(async move {
+            let local_dir = entry.local_backup_dir();
+            if Path::new(&local_dir).exists() {
+                if let Err(err) = fs::remove_dir_all(&local_dir) {
+                    error!("remove {} failed: {}", local_dir, err);
+                    Toast::show(format!("Failed to delete {} local backup!", entry.name));
+                } else {
+                    Toast::show(format!("Deleted {} local backup!", entry.name));
+                }
+            } else {
+                Toast::show(format!("{} local backup not found!", entry.name));
+            }
             Loading::hide();
             pending.store(false, Ordering::Relaxed);
         });
@@ -483,7 +636,13 @@ impl GameList {
         }
     }
 
-    pub fn update(&mut self, buttons: u32, title: &Title, titles: &Titles) {
+    pub fn update(
+        &mut self,
+        buttons: u32,
+        title: Option<&Title>,
+        titles: &Titles,
+        emu: Option<&EmulatorEntry>,
+    ) {
         self.mount_game_dir_if_exists();
 
         if self.is_pending() {
@@ -493,10 +652,107 @@ impl GameList {
             }
             return;
         }
+
+        // Folder picker mode: cross toggles a folder, circle saves and
+        // returns to the action list. The game menu defers its circle-close
+        // while the picker is active (see GameMenu::update).
+        if self.folder_picker.is_some() {
+            let mut picker = self.folder_picker.take().unwrap();
+            if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+                let excluded: Vec<String> = picker
+                    .iter()
+                    .filter(|(_, included)| !*included)
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                if let GameListMode::Emulator(entry) = &self.mode {
+                    let mut config = Config::global();
+                    config.set_psp_exclusions(&entry.id, excluded);
+                    config.save();
+                    Config::update_global(config);
+                }
+            } else {
+                if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
+                    if let Some(row) = picker.get_mut(self.list_state.selected_idx as usize) {
+                        row.1 = !row.1;
+                    }
+                }
+                self.list_state.update(picker.len() as i32, buttons);
+                self.folder_picker = Some(picker);
+            }
+            return;
+        }
+
         let ListState { selected_idx, .. } = self.list_state;
         if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
-            let action = &self.list[selected_idx as usize];
-            match action {
+            match &self.mode {
+                GameListMode::Emulator(entry) => {
+                    // The caller keeps mode and selection in step; bail out if
+                    // they ever disagree instead of acting on the wrong game.
+                    if emu.is_none() {
+                        return;
+                    }
+                    let action = &self.list[selected_idx as usize];
+                    match action {
+                        GameMenuAction::BackupAllGameSave => {
+                            if UIDialog::present(&GameMenuAction::BackupAllGameSave) {
+                                self.backup_emulator_to_local(entry);
+                            }
+                        }
+                        GameMenuAction::BackupAllToServer => {
+                            if UIDialog::present(&GameMenuAction::BackupAllToServer) {
+                                self.backup_emulator_to_server(entry);
+                            }
+                        }
+                        GameMenuAction::DeleteSelectedGameSave => {
+                            let mut count = 3;
+                            loop {
+                                if UIDialog::present(&if count == 0 {
+                                    format!("{}", GameMenuAction::DeleteSelectedGameSave)
+                                } else {
+                                    format!(
+                                        "{}: {}",
+                                        GameMenuAction::DeleteSelectedGameSave, count
+                                    )
+                                }) {
+                                    if count == 0 {
+                                        self.delete_emulator_backups(entry);
+                                        break;
+                                    } else {
+                                        count -= 1;
+                                    }
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        GameMenuAction::SelectFolders => {
+                            let exclusions = Config::global().psp_exclusions_for(&entry.id);
+                            let picker: Vec<(String, bool)> = entry
+                                .all_paths()
+                                .iter()
+                                .map(|p| {
+                                    let name = Path::new(p)
+                                        .file_name()
+                                        .unwrap_or(OsStr::new(""))
+                                        .to_string_lossy()
+                                        .to_string();
+                                    let included = !exclusions.iter().any(|ex| ex == &name);
+                                    (name, included)
+                                })
+                                .collect();
+                            self.list_state.reset();
+                            self.folder_picker = Some(picker);
+                        }
+                        _ => {}
+                    }
+                }
+                GameListMode::Native => {
+                    let title = match title {
+                        Some(title) => title,
+                        None => return,
+                    };
+                    let action = &self.list[selected_idx as usize];
+                    match action {
                 GameMenuAction::LaunchApp => {
                     if UIDialog::present(&format!(
                         "{}: {}",
@@ -596,6 +852,10 @@ impl GameList {
                         }
                     }
                 }
+                // PSP-only action; never part of the native list.
+                GameMenuAction::SelectFolders => {}
+            }
+                }
             }
         }
 
@@ -603,6 +863,49 @@ impl GameList {
     }
 
     pub fn draw(&self, left: i32, top: i32) {
+        // Folder picker mode: checkbox rows instead of the action list.
+        if let Some(picker) = &self.folder_picker {
+            let ListState {
+                top_row,
+                selected_idx,
+                display_row,
+            } = self.list_state;
+            for idx in 0..display_row {
+                let i = top_row + idx;
+                if i >= picker.len() as i32 {
+                    break;
+                }
+                let (name, included) = &picker[i as usize];
+                let x = left + 12;
+                let y = top + 22 + 14;
+                if i == selected_idx {
+                    vita2d_draw_rect(
+                        x as f32,
+                        (y + 30 * idx - 22) as f32,
+                        (SCREEN_WIDTH / 2 - 24) as f32,
+                        30.0,
+                        get_active_color(),
+                    );
+                    vita2d_draw_rect(
+                        (x + 2) as f32,
+                        (y + 2 + 30 * idx - 22) as f32,
+                        (SCREEN_WIDTH / 2 - 28) as f32,
+                        26.0,
+                        rgba(0x18, 0x18, 0x18, 0xff),
+                    );
+                }
+                let label = format!("{} {}", if *included { "[x]" } else { "[ ]" }, name);
+                vita2d_draw_text(
+                    x + 8,
+                    y + 30 * idx,
+                    rgba(0xff, 0xff, 0xff, 0xff),
+                    1.0,
+                    &label,
+                );
+            }
+            return;
+        }
+
         let actions = &self.list;
         let size = actions.len() as i32;
         let ListState {

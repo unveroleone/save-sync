@@ -421,15 +421,20 @@ impl UIBase for UITitles {
         if self.save_menu.is_forces() {
             self.save_menu.update(buttons);
         } else if self.game_menu.is_forces() {
-            // game menu is only ever opened for native titles
             if self.selected_idx < native_count {
                 self.game_menu.update(
                     buttons,
-                    app_data
-                        .titles
-                        .get_title_by_idx(self.selected_idx)
-                        .expect("selected title"),
+                    app_data.titles.get_title_by_idx(self.selected_idx),
                     &app_data.titles,
+                    None,
+                );
+            } else {
+                let emu_idx = (self.selected_idx - native_count) as usize;
+                self.game_menu.update(
+                    buttons,
+                    None,
+                    &app_data.titles,
+                    self.emulator_entries.get(emu_idx),
                 );
             }
         } else {
@@ -448,13 +453,26 @@ impl UIBase for UITitles {
                         if let Some(entry) = self.emulator_entries.get(emu_idx) {
                             let id = entry.id.clone();
                             let name = entry.name.clone();
-                            self.save_menu
-                                .open_for(&id, &name, Some(entry.save_target()), false);
+                            let server_title = entry.server_title.clone();
+                            let exclusions =
+                                crate::config::Config::global().psp_exclusions_for(&entry.id);
+                            self.save_menu.open_for(
+                                &id,
+                                &name,
+                                &server_title,
+                                Some(entry.save_target_excluding(&exclusions)),
+                                false,
+                            );
                         }
                     }
                 } else if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {
                     if self.selected_idx < native_count {
                         self.game_menu.open();
+                    } else {
+                        let emu_idx = (self.selected_idx - native_count) as usize;
+                        if let Some(entry) = self.emulator_entries.get(emu_idx) {
+                            self.game_menu.open_emulator(entry);
+                        }
                     }
                 }
             }
