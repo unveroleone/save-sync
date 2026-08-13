@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::{fs, path::Path, sync::RwLock};
 
@@ -12,6 +13,11 @@ pub struct Config {
     pub verify_hashes: bool,
     pub upload_on_sync_all: bool,
     pub download_on_sync_all: bool,
+    /// PSP folders excluded from backups, keyed by entry id (e.g.
+    /// "PSP_ULJM05800" -> ["ULJM05800INS"]). Exclusions (not inclusions) so a
+    /// new folder suffix is backed up by default.
+    #[serde(default)]
+    pub psp_folder_exclusions: HashMap<String, Vec<String>>,
 }
 
 impl Default for Config {
@@ -23,6 +29,7 @@ impl Default for Config {
             verify_hashes: true,
             upload_on_sync_all: true,
             download_on_sync_all: true,
+            psp_folder_exclusions: HashMap::new(),
         }
     }
 }
@@ -53,6 +60,22 @@ impl Config {
 
     pub fn is_configured(&self) -> bool {
         !self.server_url.is_empty() && !self.api_token.is_empty()
+    }
+
+    pub fn psp_exclusions_for(&self, entry_id: &str) -> Vec<String> {
+        self.psp_folder_exclusions
+            .get(entry_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_psp_exclusions(&mut self, entry_id: &str, exclusions: Vec<String>) {
+        if exclusions.is_empty() {
+            self.psp_folder_exclusions.remove(entry_id);
+        } else {
+            self.psp_folder_exclusions
+                .insert(entry_id.to_string(), exclusions);
+        }
     }
 
     pub fn global() -> Config {

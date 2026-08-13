@@ -10,6 +10,14 @@ pub const GAME_SAVE_DIR: &str = "ux0:user/00/savedata";
 // emulator save paths
 pub const PSP_SAVE_DIR: &str = "ux0:pspemu/PSP/SAVEDATA";
 pub const RETROARCH_DIR: &str = "ux0:data/retroarch";
+// RetroArch keeps every game's saves together in these shared folders, so a
+// game is a set of files named after its ROM rather than a folder of its own.
+pub const RETROARCH_SAVE_SUBDIRS: [&str; 2] = ["savefiles", "savestates"];
+// battery / memory-card save extensions written under savefiles/
+pub const RETROARCH_SAVE_EXTS: [&str; 8] =
+    ["srm", "sav", "rtc", "eep", "fla", "mcr", "dsv", "bsv"];
+// RetroArch nests one extra level when "sort saves by core" is enabled
+pub const RETROARCH_SCAN_DEPTH: u32 = 1;
 
 pub const PSV_DEVICES: [&str; 11] = [
     "ux0:", "uma0:", "grw0:", "os0:", "pd0:", "sa0:", "tm0:", "ud0:", "ur0:", "vd0:", "vs0:",
@@ -54,6 +62,8 @@ pub const SAVE_DRAWER_CLOUD_BOTTOM_BAR_TEXT: &str =
     "(□) Restore  (△) Delete  (〇) Close  (X) Select";
 pub const ACTION_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
 pub const TITLE_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
+// PSP folder picker (game menu)
+pub const FOLDER_PICKER_BOTTOM_BAR_TEXT: &str = "(X) Toggle    (〇) Save";
 
 // save menu tabs
 pub const TAB_LOCAL: &str = "Local Backup";

@@ -14,7 +14,7 @@ use log::error;
 use zip::ZipWriter;
 
 use crate::{
-    constant::{BACKUP_BLACK_LIST, GAME_SAVE_LOCAL_DIR, SAVE_CLOUD_DIR},
+    constant::{BACKUP_BLACK_LIST, GAME_SAVE_LOCAL_DIR, PSP_SAVE_DIR, RETROARCH_DIR, SAVE_CLOUD_DIR},
     emulator::psp_title_prefix,
     ime::get_current_format_time,
     tai::{change_psv_account_id, get_psv_account_id},
@@ -204,9 +204,10 @@ fn zip_dir_named(
     Ok(())
 }
 
-/// Zip several directories into one archive, each stored under its own folder
-/// name. `sources` holds `(zip_folder_name, fs_path)` pairs; an empty folder
-/// name stores that directory's contents at the archive root.
+/// Zip several sources into one archive. `sources` holds `(zip_entry_name,
+/// fs_path)` pairs. A directory is stored under its folder name, or at the
+/// archive root when the name is empty. A file is stored at its entry name,
+/// which may be a relative path so it extracts back into a subfolder.
 pub fn zip_dirs(
     sources: &[(String, String)],
     to: &str,
@@ -221,19 +222,37 @@ pub fn zip_dirs(
     let mut zip = zip::ZipWriter::new(fs::File::create(output_path)?);
     let options =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    for (folder_name, dir_path) in sources {
-        if !Path::new(dir_path).is_dir() {
+    let mut buffer = vec![0; 1024 * 512];
+    for (entry_name, source_path) in sources {
+        let path = Path::new(source_path);
+        if path.is_file() {
+            if entry_name.is_empty() {
+                continue;
+            }
+            #[allow(deprecated)]
+            zip.start_file_from_path(Path::new(entry_name), options)?;
+            let mut input_file = fs::File::open(path)?;
+            loop {
+                let size = input_file.read(&mut buffer)?;
+                if size == 0 {
+                    break;
+                }
+                zip.write_all(&buffer[0..size])?;
+            }
             continue;
         }
-        let root = if dir_path.ends_with("/") {
-            dir_path.to_string()
-        } else {
-            format!("{}/", dir_path)
-        };
-        if !folder_name.is_empty() {
-            zip.add_directory(format!("{}/", folder_name), options)?;
+        if !path.is_dir() {
+            continue;
         }
-        zip_dir_named(&mut zip, Path::new(&root), &root, folder_name, back_list)?;
+        let root = if source_path.ends_with("/") {
+            source_path.to_string()
+        } else {
+            format!("{}/", source_path)
+        };
+        if !entry_name.is_empty() {
+            zip.add_directory(format!("{}/", entry_name), options)?;
+        }
+        zip_dir_named(&mut zip, Path::new(&root), &root, entry_name, back_list)?;
     }
     zip.finish()?;
     Ok(())
@@ -340,7 +359,27 @@ pub fn update_sfo_file_with_current_account_id(sfo_path: &str) -> Result<(), Box
 }
 
 pub fn backup_game_save(from: &str, to: &str) -> Result<(), Box<dyn Error>> {
-    zip_dir(from, to, &BACKUP_BLACK_LIST)
+    let result = zip_dir(from, to, &BACKUP_BLACK_LIST);
+    if result.is_ok() {
+        if let Some(hash) = content_hash_sources(&[(String::new(), from.to_string())]) {
+            let _ = fs::write(format!("{}.chash", to), &hash);
+        }
+    }
+    result
+}
+
+/// How a save is spread over the filesystem, which decides both how it is
+/// archived and where a restore puts it back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SaveLayout {
+    /// One directory, archived at the root of the zip.
+    Contents,
+    /// Sibling directories below `restore_root`, each archived under its name.
+    Folders,
+    /// Individual files below `restore_root`, archived under their path
+    /// relative to it. RetroArch keeps every game's save in shared folders,
+    /// so a game is a set of files rather than a directory of its own.
+    Files,
 }
 
 /// What a save is made of: the directories to archive and where a restore puts
@@ -348,11 +387,12 @@ pub fn backup_game_save(from: &str, to: &str) -> Result<(), Box<dyn Error>> {
 /// PSP game can own several sibling folders under a shared parent.
 #[derive(Debug, Clone)]
 pub struct SaveTarget {
-    /// `(zip_folder_name, fs_path)` pairs. An empty folder name stores that
+    /// `(zip_entry_name, fs_path)` pairs. An empty entry name stores that
     /// directory's contents at the archive root.
     pub sources: Vec<(String, String)>,
     /// Directory a restore extracts into.
     pub restore_root: String,
+    pub layout: SaveLayout,
 }
 
 impl SaveTarget {
@@ -361,6 +401,36 @@ impl SaveTarget {
         SaveTarget {
             sources: vec![(String::new(), path.to_string())],
             restore_root: path.to_string(),
+            layout: SaveLayout::Contents,
+        }
+    }
+
+    /// A save made of individual files below `restore_root`. Each file is
+    /// archived under its path relative to the root so the zip holds only this
+    /// game's files and extracts them back over the originals.
+    pub fn files(files: &[String], restore_root: &str) -> SaveTarget {
+        let root_prefix = format!("{}/", restore_root.trim_end_matches('/'));
+        let mut sources: Vec<(String, String)> = files
+            .iter()
+            .map(|path| {
+                let entry_name = path
+                    .strip_prefix(&root_prefix)
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| {
+                        Path::new(path)
+                            .file_name()
+                            .unwrap_or(OsStr::new(""))
+                            .to_string_lossy()
+                            .to_string()
+                    });
+                (entry_name, path.to_string())
+            })
+            .collect();
+        sources.sort();
+        SaveTarget {
+            sources,
+            restore_root: restore_root.to_string(),
+            layout: SaveLayout::Files,
         }
     }
 
@@ -386,6 +456,7 @@ impl SaveTarget {
         SaveTarget {
             sources,
             restore_root: restore_root.to_string(),
+            layout: SaveLayout::Folders,
         }
     }
 
@@ -399,7 +470,7 @@ impl SaveTarget {
     }
 
     fn is_rooted_at_contents(&self) -> bool {
-        self.sources.len() == 1 && self.sources[0].0.is_empty()
+        self.layout == SaveLayout::Contents
     }
 }
 
@@ -437,7 +508,9 @@ pub fn is_grouped_archive(from: &str) -> bool {
 /// restores to its shared parent, but a game-rooted archive has to go straight
 /// into the save folder instead.
 pub fn restore_root_for(target: &SaveTarget, from: &str) -> String {
-    if target.is_rooted_at_contents() || is_grouped_archive(from) {
+    // Only a grouped folder target can receive a game-rooted archive; the
+    // others always name their entries relative to the restore root.
+    if target.layout != SaveLayout::Folders || is_grouped_archive(from) {
         target.restore_root.to_string()
     } else {
         target.primary_source().to_string()
@@ -445,11 +518,229 @@ pub fn restore_root_for(target: &SaveTarget, from: &str) -> String {
 }
 
 pub fn backup_save_target(target: &SaveTarget, to: &str) -> Result<(), Box<dyn Error>> {
-    if target.is_rooted_at_contents() {
+    backup_save_target_inner(target, to, true)
+}
+
+/// Backup without the content-hash sidecar. Auto-backups hold the pre-restore
+/// save; stamping them would make scans treat the old save as the newest
+/// local state and offer to upload it back over the server.
+fn backup_save_target_inner(
+    target: &SaveTarget,
+    to: &str,
+    write_sidecar: bool,
+) -> Result<(), Box<dyn Error>> {
+    let res = if target.is_rooted_at_contents() {
         zip_dir(&target.sources[0].1, to, &BACKUP_BLACK_LIST)
     } else {
         zip_dirs(&target.sources, to, &BACKUP_BLACK_LIST)
+    };
+    // Remember the canonical content hash next to the zip so status checks
+    // and uploads never have to re-read (or re-zip) the save.
+    if res.is_ok() && write_sidecar {
+        if let Some(hash) = content_hash_sources(&target.sources) {
+            let _ = fs::write(format!("{}.chash", to), &hash);
+        }
     }
+    res
+}
+
+/// Canonical content hash of a save: sha256 over `(relative path, bytes)` of
+/// every file, sorted by relative path. Identical on every device because it
+/// never sees absolute paths, so the Vita app and the hub can compare saves
+/// through the server. Returns None when any source is missing.
+pub fn content_hash_sources(sources: &[(String, String)]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (entry_name, path) in sources {
+        let p = Path::new(path);
+        if p.is_dir() {
+            let mut rels: Vec<String> = Vec::new();
+            collect_dir_files(p, "", &mut rels).ok()?;
+            for rel in rels {
+                // Skip exactly what the zip skips, or two devices with the
+                // same save but different device-specific files (keystone,
+                // sealedkey) would hash differently.
+                if BACKUP_BLACK_LIST.iter().any(|b| b == &rel) {
+                    continue;
+                }
+                let bytes = fs::read(format!("{}/{}", path, rel)).ok()?;
+                let full = if entry_name.is_empty() {
+                    rel
+                } else {
+                    format!("{}/{}", entry_name, rel)
+                };
+                files.push((full, bytes));
+            }
+        } else if p.is_file() {
+            if entry_name.is_empty() {
+                continue;
+            }
+            let bytes = fs::read(path).ok()?;
+            files.push((entry_name.clone(), bytes));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = Sha256::new();
+    for (rel, bytes) in &files {
+        hasher.update(rel.as_bytes());
+        hasher.update(&[0u8]);
+        hasher.update(bytes);
+    }
+    let hash = hasher.finalize();
+    Some(format!(
+        "sha256:{}",
+        hash.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    ))
+}
+
+/// Relative paths of every file below `dir`, sorted. Recursion order is
+/// collected first and sorted after so the hash never depends on readdir
+/// order.
+fn collect_dir_files(dir: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        if path.is_dir() {
+            collect_dir_files(&path, &rel, out)?;
+        } else {
+            out.push(rel);
+        }
+    }
+    out.sort();
+    Ok(())
+}
+
+/// Content hash stored next to a backup zip (empty for zips made by older
+/// builds).
+pub fn read_content_hash_sidecar(zip_path: &str) -> Option<String> {
+    let data = fs::read_to_string(format!("{}.chash", zip_path)).ok()?;
+    let data = data.trim();
+    if data.is_empty() {
+        None
+    } else {
+        Some(data.to_string())
+    }
+}
+
+/// File entries (relative names) an archive holds. Directory entries are
+/// skipped.
+fn archive_file_entries(from: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let file = match fs::File::open(from) {
+        Ok(file) => file,
+        Err(_) => return names,
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(zip) => zip,
+        Err(_) => return names,
+    };
+    for i in 0..zip.len() {
+        let name = match zip.by_index(i) {
+            Ok(entry) => entry.name().to_string(),
+            Err(_) => continue,
+        };
+        if !name.ends_with('/') {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// SaveTarget to restore a downloaded archive through the normal restore path
+/// (auto-backup included). PSP archives hold grouped save folders; RetroArch
+/// archives hold per-game files below the retroarch root. Native saves must
+/// restore through the Games tab (PFS mount), so they get None.
+pub fn save_target_for_downloaded_archive(title_id: &str, from: &str) -> Option<SaveTarget> {
+    if title_id.starts_with("PSP_") {
+        let sources: Vec<(String, String)> = archive_top_level_dirs(from)
+            .iter()
+            .map(|d| (d.clone(), format!("{}/{}", PSP_SAVE_DIR, d)))
+            .collect();
+        if sources.is_empty() {
+            return None;
+        }
+        return Some(SaveTarget {
+            sources,
+            restore_root: PSP_SAVE_DIR.to_string(),
+            layout: SaveLayout::Folders,
+        });
+    }
+    if title_id.starts_with("RETROARCH_") {
+        let files: Vec<String> = archive_file_entries(from)
+            .iter()
+            .map(|n| format!("{}/{}", RETROARCH_DIR, n))
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        return Some(SaveTarget::files(&files, RETROARCH_DIR));
+    }
+    None
+}
+
+/// True when an archive holds file entries that do not belong to the target's
+/// game, i.e. an old whole-RetroArch-folder backup. A file is foreign when it
+/// lives outside the save dirs or its ROM-name stem differs from the target's
+/// — exact membership would also refuse a game that legitimately gained or
+/// lost a file (e.g. a savestate deleted on-device). Directory entries are
+/// ignored.
+fn file_stem_of(name: &str) -> String {
+    match Path::new(name).file_name().and_then(|n| n.to_str()) {
+        Some(n) => match n.rfind('.') {
+            Some(dot) => n[..dot].to_string(),
+            None => n.to_string(),
+        },
+        None => String::new(),
+    }
+}
+
+fn archive_has_foreign_files(target: &SaveTarget, from: &str) -> bool {
+    const RA_SAVE_DIRS: [&str; 4] = ["savefiles", "savestates", "saves", "states"];
+
+    let target_stem = target
+        .sources
+        .first()
+        .map(|(name, _)| file_stem_of(name))
+        .unwrap_or_default();
+
+    let file = match fs::File::open(from) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(zip) => zip,
+        Err(_) => return false,
+    };
+    for i in 0..zip.len() {
+        let name = match zip.by_index(i) {
+            Ok(entry) => entry.name().to_string(),
+            Err(_) => continue,
+        };
+        if name.ends_with('/') {
+            continue;
+        }
+        let top = name.split('/').next().unwrap_or("");
+        if !RA_SAVE_DIRS.contains(&top) {
+            return true;
+        }
+        // Without a stem to compare against, fall back to exact membership.
+        if target_stem.is_empty() {
+            if !target.sources.iter().any(|(n, _)| n == &name) {
+                return true;
+            }
+        } else if file_stem_of(&name) != target_stem {
+            return true;
+        }
+    }
+    false
 }
 
 /// Top-level directory names an archive will write into.
@@ -486,7 +777,10 @@ fn archive_top_level_dirs(from: &str) -> Vec<String> {
 /// recoverable otherwise.
 fn overwrite_scope(target: &SaveTarget, from: &str, to: &str) -> SaveTarget {
     let mut sources = target.sources.clone();
-    if to == target.restore_root {
+    // Only grouped folder targets can be hit by a legacy whole-library archive.
+    // A file target names its own entries, so expanding it over the archive's
+    // top-level directories would drag every other game into the auto-backup.
+    if target.layout == SaveLayout::Folders && to == target.restore_root {
         for dir in archive_top_level_dirs(from) {
             if sources.iter().any(|(name, _)| name == &dir) {
                 continue;
@@ -500,10 +794,20 @@ fn overwrite_scope(target: &SaveTarget, from: &str, to: &str) -> SaveTarget {
     SaveTarget {
         sources,
         restore_root: target.restore_root.to_string(),
+        layout: target.layout.clone(),
     }
 }
 
 pub fn restore_save_target(target: &SaveTarget, from: &str) -> Result<(), Box<dyn Error>> {
+    // An old whole-RetroArch-folder archive restored over a per-game entry
+    // would overwrite every other game's saves, and the auto-backup only
+    // covers this game's files, so refuse instead of extracting.
+    if target.layout == SaveLayout::Files && archive_has_foreign_files(target, from) {
+        return Err(
+            "Archive contains files from other games (pre-per-game backup); restore skipped."
+                .into(),
+        );
+    }
     let to = restore_root_for(target, from);
     if let Some(from_parent) = Path::new(from).parent() {
         if let Some(auto_backup_path) = from_parent
@@ -511,7 +815,7 @@ pub fn restore_save_target(target: &SaveTarget, from: &str) -> Result<(), Box<dy
             .to_str()
         {
             Loading::notify_title("Auto-backing up...".to_string());
-            let _ = backup_save_target(&overwrite_scope(target, from, &to), auto_backup_path);
+            let _ = backup_save_target_inner(&overwrite_scope(target, from, &to), auto_backup_path, false);
         }
     }
     Loading::notify_title("Restoring save...".to_string());
@@ -580,7 +884,12 @@ pub fn get_game_local_backup_dir(title_id: &str, name: &str) -> String {
                         .unwrap_or(OsStr::new(""))
                         .to_str()
                         .unwrap_or("");
-                    if !name.is_empty() && name.starts_with(title_id) {
+                    // Directories are "<title_id> <name>"; matching the id
+                    // plus a space keeps free-form ids from swallowing each
+                    // other (RETROARCH_Mario must not reuse the
+                    // RETROARCH_Mario Kart directory).
+                    let prefix = format!("{} ", title_id);
+                    if !name.is_empty() && name.starts_with(&prefix) {
                         return path.to_str().unwrap_or(&default_dir_path).to_string();
                     }
                 }
