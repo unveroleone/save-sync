@@ -1,6 +1,6 @@
 [package]
 name = "save-sync-hub"
-version = "0.1.4"
+version = "0.2.2"
 edition = "2021"
 
 [lib]
