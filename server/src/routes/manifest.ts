@@ -7,7 +7,11 @@ export async function manifestRoutes(app: FastifyInstance): Promise<void> {
     const userName = getUserName();
     const manifest = readManifest(userName);
     for (const titleId of Object.keys(manifest.games)) {
-      manifest.games[titleId].versionCount = countVersions(userName, titleId);
+      manifest.games[titleId].versionCount = countVersions(
+        userName,
+        titleId,
+        manifest.games[titleId].dir,
+      );
     }
     reply.send(manifest);
   });

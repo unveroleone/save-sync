@@ -5,6 +5,7 @@ import {
   ensureDir,
   readManifest,
   writeManifest,
+  sanitizeTitle,
   GameEntry,
 } from '../storage/disk.js';
 import fs from 'fs';
@@ -21,6 +22,17 @@ function computeSha256(filePath: string): string {
   return 'sha256:' + hash.digest('hex');
 }
 
+/// Decode the X-Save-Title header into a usable title, or undefined.
+function decodeTitleHeader(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  try {
+    const title = Buffer.from(value, 'base64').toString('utf8');
+    return title.length > 0 ? title : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function savesRoutes(app: FastifyInstance): Promise<void> {
   app.put<{ Params: SaveParams }>(
     '/api/save/:titleId',
@@ -32,9 +44,23 @@ export async function savesRoutes(app: FastifyInstance): Promise<void> {
       const timestamp =
         (request.headers['x-save-timestamp'] as string) ??
         new Date().toISOString();
+      // Game name, base64-encoded UTF-8 (HTTP headers are ASCII only).
+      const title = decodeTitleHeader(request.headers['x-save-title']);
+      // Canonical content hash of the save files ("sha256:..."), sent by
+      // newer clients so devices can compare saves without re-downloading.
+      const contentHashHeader = request.headers['x-content-hash'];
+      const contentHash =
+        typeof contentHashHeader === 'string' &&
+        contentHashHeader.length > 0 &&
+        contentHashHeader.length <= 128
+          ? contentHashHeader
+          : undefined;
 
       const userName = getUserName();
-      const dir = titleDir(userName, titleId);
+      // The manifest remembers the resolved folder name, so look-alike
+      // titleIds can never route an upload into the wrong folder.
+      const knownDir = readManifest(userName).games[titleId]?.dir;
+      const dir = titleDir(userName, titleId, knownDir);
       ensureDir(dir);
 
       const tmpPath = path.join(dir, `upload_${Date.now()}.tmp`);
@@ -69,6 +95,26 @@ export async function savesRoutes(app: FastifyInstance): Promise<void> {
       fs.renameSync(tmpPath, currentPath);
       const size = fs.statSync(currentPath).size;
 
+      // Move the plain-id folder to "<titleId> - <title>" so backups on disk
+      // are identifiable, then remember the folder name in the manifest so
+      // resolution never has to guess again. A concurrent upload may already
+      // have done the rename; losing that race is harmless.
+      let resolvedDir = path.basename(dir);
+      const sanitizedTitle = title ? sanitizeTitle(title) : '';
+      if (sanitizedTitle.length > 0 && resolvedDir === titleId) {
+        try {
+          const renamed = path.join(path.dirname(dir), `${titleId} - ${sanitizedTitle}`);
+          fs.renameSync(dir, renamed);
+          resolvedDir = path.basename(renamed);
+        } catch (err) {
+          // ENOENT: another upload renamed it first. Anything else leaves the
+          // folder under its old name, which still resolves via titleDir.
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+            throw err;
+          }
+        }
+      }
+
       // update manifest
       const manifest = readManifest(userName);
       const entry: GameEntry = {
@@ -78,6 +124,13 @@ export async function savesRoutes(app: FastifyInstance): Promise<void> {
         uploadedBy: deviceId,
         size,
       };
+      if (sanitizedTitle.length > 0) {
+        entry.title = sanitizedTitle;
+        entry.dir = resolvedDir;
+      }
+      if (contentHash) {
+        entry.contentHash = contentHash;
+      }
       manifest.games[titleId] = entry;
       manifest.updatedAt = new Date().toISOString();
       writeManifest(userName, manifest);
@@ -92,14 +145,13 @@ export async function savesRoutes(app: FastifyInstance): Promise<void> {
     async (request: FastifyRequest<{ Params: SaveParams }>, reply: FastifyReply) => {
       const { titleId } = request.params;
       const userName = getUserName();
-      const currentPath = path.join(titleDir(userName, titleId), 'current.zip');
+      const manifest = readManifest(userName);
+      const entry = manifest.games[titleId];
+      const currentPath = path.join(titleDir(userName, titleId, entry?.dir), 'current.zip');
 
       if (!fs.existsSync(currentPath)) {
         return reply.code(404).send({ ok: false, error: 'No save found for ' + titleId });
       }
-
-      const manifest = readManifest(userName);
-      const entry = manifest.games[titleId];
 
       const data = fs.readFileSync(currentPath);
       reply
@@ -117,7 +169,8 @@ export async function savesRoutes(app: FastifyInstance): Promise<void> {
     async (request: FastifyRequest<{ Params: SaveParams }>, reply: FastifyReply) => {
       const { titleId } = request.params;
       const userName = getUserName();
-      const dir = titleDir(userName, titleId);
+      const knownDir = readManifest(userName).games[titleId]?.dir;
+      const dir = titleDir(userName, titleId, knownDir);
 
       if (!fs.existsSync(dir)) {
         return reply.code(404).send({ ok: false, error: 'No save found for ' + titleId });
