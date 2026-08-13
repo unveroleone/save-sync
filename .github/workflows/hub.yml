@@ -77,13 +77,16 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
-  # Android build requires extra setup (see notes below).
-  # Secrets needed for signed release APK:
+  # Set these secrets to ship a properly signed release APK:
   #   ANDROID_KEYSTORE (base64), ANDROID_KEYSTORE_PASSWORD,
   #   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+  # Without them the job falls back to a debug-signed APK, which sideloads fine
+  # but cannot upgrade an install signed with a different key.
   build-android:
     name: Android APK
     runs-on: ubuntu-22.04
+    # The desktop jobs create the draft release this APK is attached to.
+    needs: build-desktop
     steps:
       - uses: actions/checkout@v4
 
@@ -132,12 +135,69 @@ jobs:
         working-directory: save-sync-hub
         run: pnpm tauri android init
 
-      - name: Build Android APK
+      - name: Decode signing keystore
+        id: keystore
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE" ]; then
+            echo "$ANDROID_KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No ANDROID_KEYSTORE secret set - falling back to a debug-signed APK."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release APK
+        if: steps.keystore.outputs.signed == 'true'
         working-directory: save-sync-hub
         run: pnpm tauri android build --apk
 
-      - name: Upload APK
+      # tauri leaves the release APK unsigned, and Android refuses to install
+      # an unsigned package, so sign it here rather than shipping it as built.
+      - name: Sign release APK
+        if: steps.keystore.outputs.signed == 'true'
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS="$ANDROID_SDK_ROOT/build-tools/34.0.0"
+          UNSIGNED=$(ls save-sync-hub/src-tauri/gen/android/app/build/outputs/apk/universal/release/*-unsigned.apk)
+          "$BUILD_TOOLS/zipalign" -p -f 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/release.jks" \
+            --ks-pass "pass:$ANDROID_KEYSTORE_PASSWORD" \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" \
+            --key-pass "pass:$ANDROID_KEY_PASSWORD" \
+            --out save-sync-hub-android.apk \
+            "$RUNNER_TEMP/aligned.apk"
+
+      - name: Build debug APK
+        if: steps.keystore.outputs.signed != 'true'
+        working-directory: save-sync-hub
+        run: pnpm tauri android build --apk --debug
+
+      - name: Collect debug APK
+        if: steps.keystore.outputs.signed != 'true'
+        run: |
+          set -euo pipefail
+          cp save-sync-hub/src-tauri/gen/android/app/build/outputs/apk/universal/debug/*.apk \
+            save-sync-hub-android.apk
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: save-sync-hub-android
-          path: save-sync-hub/src-tauri/gen/android/app/build/outputs/apk/universal/release/*.apk
+          path: save-sync-hub-android.apk
+
+      - name: Attach APK to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp save-sync-hub-android.apk "Save.Sync.Hub_${GITHUB_REF_NAME#v}_android.apk"
+          gh release upload "$GITHUB_REF_NAME" \
+            "Save.Sync.Hub_${GITHUB_REF_NAME#v}_android.apk" --clobber
