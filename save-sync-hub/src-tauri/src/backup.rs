@@ -75,8 +75,77 @@ fn zip_inner(
     Ok(())
 }
 
-/// Zip multiple directories into one archive, each under its own folder name.
-/// `sources` is a slice of `(zip_folder_name, fs_path)` pairs.
+/// Canonical content hash of a save: sha256 over `(relative path, bytes)` of
+/// every file, sorted by relative path. Identical to the Vita app's algorithm
+/// so saves compare across devices through the server. Returns None when any
+/// source is missing.
+pub fn content_hash(sources: &[(String, String)]) -> Option<String> {
+    use sha2::Digest;
+
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for (entry_name, path) in sources {
+        let p = Path::new(path);
+        if p.is_dir() {
+            let mut rels: Vec<String> = Vec::new();
+            collect_rel_files(p, "", &mut rels).ok()?;
+            for rel in rels {
+                let bytes = fs::read(format!("{}/{}", path, rel)).ok()?;
+                let full = if entry_name.is_empty() {
+                    rel
+                } else {
+                    format!("{}/{}", entry_name, rel)
+                };
+                files.push((full, bytes));
+            }
+        } else if p.is_file() {
+            if entry_name.is_empty() {
+                continue;
+            }
+            let bytes = fs::read(path).ok()?;
+            files.push((entry_name.clone(), bytes));
+        }
+    }
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut hasher = sha2::Sha256::new();
+    for (rel, bytes) in &files {
+        hasher.update(rel.as_bytes());
+        hasher.update(&[0u8]);
+        hasher.update(bytes);
+    }
+    let hash = hasher.finalize();
+    Some(format!(
+        "sha256:{}",
+        hash.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    ))
+}
+
+/// Relative paths of every file below `dir`, sorted after collection so the
+/// hash never depends on readdir order.
+fn collect_rel_files(dir: &Path, prefix: &str, out: &mut Vec<String>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let rel = if prefix.is_empty() {
+            name
+        } else {
+            format!("{}/{}", prefix, name)
+        };
+        if path.is_dir() {
+            collect_rel_files(&path, &rel, out)?;
+        } else {
+            out.push(rel);
+        }
+    }
+    out.sort();
+    Ok(())
+}
+
+/// Zip multiple sources into one archive. Directories are stored under their
+/// folder name; files are stored at their entry name, which may be a relative
+/// path so a restore puts them back into a subfolder.
+/// `sources` is a slice of `(zip_entry_name, fs_path)` pairs.
 pub fn zip_dirs(sources: &[(String, String)], to: &str) -> Result<(), String> {
     let output_path = Path::new(to);
     if let Some(parent) = output_path.parent() {
@@ -89,15 +158,39 @@ pub fn zip_dirs(sources: &[(String, String)], to: &str) -> Result<(), String> {
     let options = zip::write::FileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    for (folder_name, dir_path) in sources {
-        let root = if dir_path.ends_with('/') {
-            dir_path.clone()
+    let mut buffer = vec![0u8; 1024 * 512];
+    for (entry_name, source_path) in sources {
+        let path = Path::new(source_path);
+        if path.is_file() {
+            if entry_name.is_empty() {
+                continue;
+            }
+            zip.start_file(entry_name, options)
+                .map_err(|e| format!("Zip start file failed: {}", e))?;
+            let mut f = fs::File::open(path).map_err(|e| format!("Open file failed: {}", e))?;
+            loop {
+                let n = f.read(&mut buffer).map_err(|e| format!("Read failed: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                zip.write_all(&buffer[..n])
+                    .map_err(|e| format!("Zip write failed: {}", e))?;
+            }
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        let root = if source_path.ends_with('/') {
+            source_path.clone()
         } else {
-            format!("{}/", dir_path)
+            format!("{}/", source_path)
         };
-        zip.add_directory(format!("{}/", folder_name), options)
-            .map_err(|e| format!("Zip add dir failed: {}", e))?;
-        zip_inner_named(&mut zip, Path::new(&root), &root, folder_name, &options)?;
+        if !entry_name.is_empty() {
+            zip.add_directory(format!("{}/", entry_name), options)
+                .map_err(|e| format!("Zip add dir failed: {}", e))?;
+        }
+        zip_inner_named(&mut zip, Path::new(&root), &root, entry_name, &options)?;
     }
 
     zip.finish().map_err(|e| format!("Finish zip failed: {}", e))?;

@@ -10,7 +10,7 @@
   }: {
     saves: any[];
     message: string;
-    onBackup: (titleId: string, allPaths: string[]) => void;
+    onBackup: (titleId: string, allPaths: string[], restoreDir: string) => void;
     onDownload: (titleId: string) => void;
     onRestore: (titleId: string, restoreDir: string) => void;
   } = $props();
@@ -96,7 +96,7 @@
                 {statusLabel(save.status)}
               </div>
               <div class="actions">
-                <button class="upload" onclick={() => onBackup(save.title_id, save.all_paths || [save.source_path])}>Upload</button>
+                <button class="upload" onclick={() => onBackup(save.title_id, save.all_paths || [save.source_path], save.restore_dir || save.source_path || "")}>Upload</button>
                 <button class="download" onclick={() => onDownload(save.title_id)}>Download</button>
                 <button class="restore" onclick={() => onRestore(save.title_id, save.restore_dir || save.source_path || "")}>Restore</button>
               </div>

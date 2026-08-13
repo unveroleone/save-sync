@@ -37,6 +37,23 @@ fn build_url(config: &SyncConfig, path: &str) -> String {
     format!("{}{}", config.server_url.trim_end_matches('/'), path)
 }
 
+/// Encode a save identifier for use as a URL path segment. Ids are derived
+/// from filesystem names (RetroArch ROM names), so they can contain spaces
+/// and other URL-hostile bytes. Fastify decodes the segment back on the
+/// server.
+fn url_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
 fn auth_value(config: &SyncConfig) -> String {
     format!("Bearer {}", config.api_token)
 }
@@ -56,11 +73,12 @@ pub fn get_manifest(config: &SyncConfig) -> Result<CloudManifest, String> {
 pub fn upload_save(
     config: &SyncConfig,
     title_id: &str,
+    content_hash: &str,
     zip_path: &str,
     hash: &str,
     timestamp: &str,
 ) -> Result<(), String> {
-    let url = build_url(config, &format!("/api/save/{}", title_id));
+    let url = build_url(config, &format!("/api/save/{}", url_segment(title_id)));
     let file_data =
         std::fs::read(zip_path).map_err(|e| format!("Read file failed: {}", e))?;
 
@@ -79,7 +97,7 @@ pub fn upload_save(
     body.extend_from_slice(&file_data);
     body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
 
-    let response = ureq::put(&url)
+    let mut request = ureq::put(&url)
         .set("Authorization", &auth_value(config))
         .set(
             "Content-Type",
@@ -87,9 +105,14 @@ pub fn upload_save(
         )
         .set("X-Device-Id", &config.device_name)
         .set("X-Save-Hash", hash)
-        .set("X-Save-Timestamp", timestamp)
-        .send_bytes(&body)
-        .map_err(|e| format!("Upload failed: {}", e))?;
+        .set("X-Save-Timestamp", timestamp);
+    // Canonical content hash of the save files so status checks can compare
+    // saves across devices (matches the Vita app's algorithm).
+    if !content_hash.is_empty() {
+        request = request.set("X-Content-Hash", content_hash);
+    }
+
+    let response = request.send_bytes(&body).map_err(|e| format!("Upload failed: {}", e))?;
 
     if response.status() != 200 {
         let body = response
@@ -101,7 +124,7 @@ pub fn upload_save(
 }
 
 pub fn download_save(config: &SyncConfig, title_id: &str, dest_path: &str) -> Result<(), String> {
-    let url = build_url(config, &format!("/api/save/{}", title_id));
+    let url = build_url(config, &format!("/api/save/{}", url_segment(title_id)));
     let response = ureq::get(&url)
         .set("Authorization", &auth_value(config))
         .call()
@@ -132,7 +155,7 @@ pub fn download_save(config: &SyncConfig, title_id: &str, dest_path: &str) -> Re
 }
 
 pub fn delete_save(config: &SyncConfig, title_id: &str) -> Result<(), String> {
-    let url = build_url(config, &format!("/api/save/{}", title_id));
+    let url = build_url(config, &format!("/api/save/{}", url_segment(title_id)));
     let response = ureq::delete(&url)
         .set("Authorization", &auth_value(config))
         .call()

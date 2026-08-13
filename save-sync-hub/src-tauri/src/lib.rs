@@ -98,6 +98,64 @@ fn psp_title_prefix(folder: &str) -> Option<String> {
     }
 }
 
+/// RetroArch keeps saves in these shared folders; only they are scanned.
+const RA_SAVE_DIRS: [&str; 4] = ["saves", "savefiles", "states", "savestates"];
+// Battery / memory-card save extensions RetroArch writes.
+const RA_SAVE_EXTS: [&str; 8] = ["srm", "sav", "rtc", "eep", "fla", "mcr", "dsv", "bsv"];
+
+/// RetroArch save extensions: battery/memory-card saves plus savestates,
+/// which are named `<rom>.state`, `<rom>.state1`..`<rom>.state9`, and
+/// `<rom>.state.auto`.
+fn is_ra_save_ext(ext: &str) -> bool {
+    if RA_SAVE_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+        return true;
+    }
+    if let Some(rest) = ext.strip_prefix("state") {
+        return rest.is_empty()
+            || rest.chars().all(|c| c.is_ascii_digit())
+            || rest == ".auto";
+    }
+    false
+}
+
+/// Collect RetroArch save files below `dir` into `games`, keyed by ROM-name
+/// stem. Entries are `(zip_entry_name, fs_path)` with the entry name relative
+/// to the RetroArch root so a restore lands in the same subfolder. The depth
+/// limit covers the optional sort-saves-into-core-folders nesting without
+/// walking into core config dirs.
+fn collect_retroarch_files(
+    dir: &Path,
+    rel_root: &str,
+    depth: u32,
+    games: &mut HashMap<String, Vec<(String, PathBuf)>>,
+) {
+    let Ok(read_dir) = dir.read_dir() else {
+        return;
+    };
+    for entry in read_dir.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            if depth == 0 {
+                continue;
+            }
+            let rel = format!("{}{}/", rel_root, entry.file_name().to_string_lossy());
+            collect_retroarch_files(&path, &rel, depth - 1, games);
+            continue;
+        }
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let Some((stem, ext)) = file_name.rsplit_once('.') else {
+            continue;
+        };
+        if stem.is_empty() || !is_ra_save_ext(ext) {
+            continue;
+        }
+        games
+            .entry(stem.to_string())
+            .or_default()
+            .push((format!("{}{}", rel_root, file_name), path));
+    }
+}
+
 /// Auto-correct stale reference hashes after backup/restore operations.
 /// Local and cloud use different hash methods (dir vs zip), so after a
 /// sync operation the reference hash for one side may be from the wrong
@@ -337,9 +395,82 @@ fn scan_saves(
                 status: status.to_string(),
             });
         }
+    } else if platform == "retroarch" {
+        // RetroArch keeps every game's saves together in shared folders, so a
+        // game is a set of files named after its ROM. Group files by ROM-name
+        // stem so each game syncs on its own instead of the whole save dir.
+        let mut games: HashMap<String, Vec<(String, PathBuf)>> = HashMap::new();
+        for sub in RA_SAVE_DIRS {
+            collect_retroarch_files(&save_dir.join(sub), &format!("{}/", sub), 1, &mut games);
+        }
+
+        let mut stems: Vec<String> = games.keys().cloned().collect();
+        stems.sort();
+        for stem in stems {
+            let mut files = games.remove(&stem).unwrap();
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let primary_path = files[0].1.clone();
+            let all_paths: Vec<String> = files
+                .iter()
+                .map(|(_, p)| p.to_string_lossy().to_string())
+                .collect();
+            let title_id = format!("RETROARCH_{}", stem);
+
+            let file_bufs: Vec<PathBuf> = files.iter().map(|(_, p)| p.clone()).collect();
+            let timestamp = file_bufs
+                .iter()
+                .filter_map(|p| get_dir_modified(p))
+                .max()
+                .unwrap_or_default();
+            let local_hash = compute_dirs_hash(&file_bufs).ok();
+            let size = file_bufs.iter().filter_map(|p| dir_size(p)).sum();
+
+            let cloud_entry = cloud_games.get(&title_id);
+            let sync_entry = manifest.games.entry(title_id.clone()).or_insert_with(|| GameSyncEntry {
+                title: stem.clone(),
+                local_hash: None,
+                local_timestamp: None,
+                cloud_hash: None,
+                cloud_timestamp: None,
+                last_synced_hash: None,
+                last_synced_cloud_hash: None,
+            });
+            sync_entry.title = stem.clone();
+            sync_entry.local_hash = local_hash.clone();
+            sync_entry.local_timestamp = Some(timestamp.clone());
+            if let Some(ce) = cloud_entry {
+                sync_entry.cloud_hash = Some(ce.latest_hash.clone());
+                sync_entry.cloud_timestamp = Some(ce.latest_version.clone());
+            }
+
+            correct_sync_refs(sync_entry);
+            let status = match compute_status(sync_entry) {
+                SyncStatus::InSync => "synced",
+                SyncStatus::UploadNeeded => "upload",
+                SyncStatus::DownloadAvailable => "download",
+                SyncStatus::Conflict => "conflict",
+                SyncStatus::LocalOnly => "local_only",
+                SyncStatus::CloudOnly => "cloud_only",
+            };
+
+            entries.push(SaveEntry {
+                name: stem.clone(),
+                title_id,
+                source_path: primary_path.to_string_lossy().to_string(),
+                all_paths,
+                restore_dir: save_dir.to_string_lossy().to_string(),
+                icon_path: None,
+                source_label: label.clone(),
+                hash: local_hash.unwrap_or_default(),
+                timestamp,
+                size,
+                status: status.to_string(),
+            });
+        }
     } else {
-        // For retroarch and custom: auto-detect PSP saves by folder naming
-        // pattern and group them, otherwise treat each folder independently.
+        // For custom paths: auto-detect PSP saves by folder naming pattern
+        // and group them, otherwise treat each folder independently.
         let dir_entries: Vec<_> = save_dir
             .read_dir()
             .map_err(|e| format!("Read dir failed: {}", e))?
@@ -348,11 +479,6 @@ fn scan_saves(
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
                 if !is_dir { return None; }
                 let name = e.file_name().to_string_lossy().to_string();
-                // skip RetroArch-ineligible folders
-                if platform == "retroarch" {
-                    const SAVE_DIRS: &[&str] = &["saves", "savefiles", "states", "savestates"];
-                    if !SAVE_DIRS.contains(&name.as_str()) { return None; }
-                }
                 Some((name, e.path()))
             })
             .collect();
@@ -454,14 +580,9 @@ fn scan_saves(
             }
         } else {
             for (name, dir_path) in dir_entries {
-                let title_id = if platform == "retroarch" {
-                    format!("RETROARCH_{}", name)
-                } else {
-                    name.clone()
-                };
                 process_single_entry(
                     &mut entries, &mut manifest, &cloud_games,
-                    name, title_id,
+                    name.clone(), name,
                     dir_path, &save_dir, &label,
                 );
             }
@@ -498,6 +619,7 @@ fn backup_and_upload(
     state: State<AppState>,
     title_id: String,
     all_paths: Vec<String>,
+    zip_root: Option<String>,
 ) -> Result<String, String> {
     let config = state.config.lock().map_err(|e| e.to_string())?;
     if config.server_url.is_empty() || config.api_token.is_empty() {
@@ -509,19 +631,34 @@ fn backup_and_upload(
     let zip_name = format!("{}.zip", title_id);
     let zip_path = tmp_dir.join(&zip_name);
 
-    if all_paths.len() == 1 {
-        backup::zip_dir(&all_paths[0], &zip_path.to_string_lossy())?;
+    let has_files = all_paths.iter().any(|p| Path::new(p).is_file());
+    // Entry names are relative to zip_root (a RetroArch entry holds save
+    // files, which must restore back into savefiles/ etc). Fall back to
+    // the bare file name when a path sits outside the root.
+    let root_prefix = zip_root
+        .as_ref()
+        .map(|r| format!("{}/", r.trim_end_matches('/')))
+        .unwrap_or_default();
+    let sources: Vec<(String, String)> = if all_paths.len() == 1 && !has_files {
+        vec![(String::new(), all_paths[0].clone())]
     } else {
-        let sources: Vec<(String, String)> = all_paths
+        all_paths
             .iter()
             .map(|p| {
-                let name = Path::new(p)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| p.clone());
-                (name, p.clone())
+                let rel = match p.strip_prefix(&root_prefix) {
+                    Some(rel) => rel.to_string(),
+                    None => Path::new(p)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone()),
+                };
+                (rel, p.clone())
             })
-            .collect();
+            .collect()
+    };
+    if all_paths.len() == 1 && !has_files {
+        backup::zip_dir(&all_paths[0], &zip_path.to_string_lossy())?;
+    } else {
         backup::zip_dirs(&sources, &zip_path.to_string_lossy())?;
     }
 
@@ -530,8 +667,18 @@ fn backup_and_upload(
     let local_hash = compute_dirs_hash(&all_path_bufs).unwrap_or_default();
     let zip_hash = backup::sha256_file(&zip_path.to_string_lossy())?;
     let timestamp = chrono_now();
+    // Canonical content hash, same algorithm as the Vita app, so saves
+    // uploaded from either side compare equal when their content matches.
+    let content_hash = backup::content_hash(&sources).unwrap_or_default();
 
-    api::upload_save(&config, &title_id, &zip_path.to_string_lossy(), &zip_hash, &timestamp)?;
+    api::upload_save(
+        &config,
+        &title_id,
+        &content_hash,
+        &zip_path.to_string_lossy(),
+        &zip_hash,
+        &timestamp,
+    )?;
 
     let mut manifest = LocalManifest::load(&manifest_path());
     let entry = manifest.games.entry(title_id.clone()).or_insert_with(|| GameSyncEntry {

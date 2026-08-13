@@ -170,10 +170,10 @@
     }
   }
 
-  async function handleBackup(titleId: string, allPaths: string[]) {
+  async function handleBackup(titleId: string, allPaths: string[], restoreDir: string) {
     message = "Uploading...";
     try {
-      const res = await invoke("backup_and_upload", { titleId, allPaths });
+      const res = await invoke("backup_and_upload", { titleId, allPaths, zipRoot: restoreDir });
       await scanAll();
       message = res as string;
     } catch (e: any) {
