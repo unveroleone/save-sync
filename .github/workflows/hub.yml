@@ -77,6 +77,26 @@ jobs:
           prerelease: false
           args: ${{ matrix.args }}
 
+      # The Tauri bundler ships the build machine's GTK/WebKitGTK/wayland
+      # libraries inside the AppImage, which breaks newer host graphics
+      # stacks (blank window + EGL_BAD_PARAMETER on Bazzite/Fedora). Repack
+      # without those libs so the app uses the host system's webkit2gtk-4.1,
+      # then swap the asset on the draft release.
+      - name: Repack Linux AppImage without bundled GTK/WebKit libs
+        if: matrix.os == 'ubuntu-22.04' && startsWith(github.ref, 'refs/tags/')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y squashfs-tools file
+          BUNDLE_DIR="save-sync-hub/src-tauri/target/release/bundle/appimage"
+          ORIGINAL="$(ls "$BUNDLE_DIR"/*.AppImage | head -n1)"
+          ASSET_NAME="$(basename "$ORIGINAL")"
+          REPACKED="$RUNNER_TEMP/$ASSET_NAME"
+          save-sync-hub/scripts/strip-appimage.sh "$(pwd)/$ORIGINAL" "$REPACKED"
+          gh release delete-asset "$GITHUB_REF_NAME" "$ASSET_NAME" --yes || true
+          gh release upload "$GITHUB_REF_NAME" "$REPACKED"
+
   # Set these secrets to ship a properly signed release APK:
   #   ANDROID_KEYSTORE (base64), ANDROID_KEYSTORE_PASSWORD,
   #   ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
