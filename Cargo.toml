@@ -1,6 +1,6 @@
 [package]
 name = "vita-save-cloud"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 # Renamed product: Save Sync — see [package.metadata.vita] below
 
