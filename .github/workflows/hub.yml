@@ -91,7 +91,8 @@ jobs:
           sudo apt-get install -y squashfs-tools file
           BUNDLE_DIR="save-sync-hub/src-tauri/target/release/bundle/appimage"
           ORIGINAL="$(ls "$BUNDLE_DIR"/*.AppImage | head -n1)"
-          ASSET_NAME="$(basename "$ORIGINAL")"
+          # tauri-action uploads with dots instead of spaces, match that
+          ASSET_NAME="$(basename "$ORIGINAL" | tr ' ' '.')"
           REPACKED="$RUNNER_TEMP/$ASSET_NAME"
           save-sync-hub/scripts/strip-appimage.sh "$(pwd)/$ORIGINAL" "$REPACKED"
           gh release delete-asset "$GITHUB_REF_NAME" "$ASSET_NAME" --yes || true
