@@ -54,7 +54,9 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
             sh -s -- -y --default-toolchain none --no-modify-path
           /root/.cargo/bin/rustup toolchain install nightly-2025-06-01 --component rust-src
-          /root/.cargo/bin/cargo install cargo-vita --locked
+          # --force: the Rust cache may restore a cargo-vita binary from a
+          # previous run, which plain `cargo install` refuses to overwrite.
+          /root/.cargo/bin/cargo install cargo-vita --locked --force
           echo "/root/.cargo/bin" >> "$GITHUB_PATH"
           echo "CARGO_HOME=/root/.cargo" >> "$GITHUB_ENV"
           echo "RUSTUP_HOME=/root/.rustup" >> "$GITHUB_ENV"
