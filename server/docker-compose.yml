@@ -8,8 +8,13 @@ services:
     environment:
       - USER_TOKEN=${USER_TOKEN:?set a strong token}
       - DATA_DIR=/data
+      # Opt-in: mirror every save as plain unzipped files so Syncthing (or
+      # any file sync tool) can watch and edit them. Point this at a folder
+      # you then share with Syncthing.
+      # - RAW_SAVES_DIR=/raw
     volumes:
       - vita-save-data:/data
+      # - /path/on/nas/vita-raw:/raw
 
 volumes:
   vita-save-data:

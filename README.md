@@ -57,6 +57,8 @@ The Vita app requires HENkaku + iTLS-Enso. Save Sync Hub is a standard desktop/A
 
 The server is a small Node.js app. It stores save files on disk and exposes a REST API. You need to keep it running while you sync, it does not need to be on 24/7.
 
+**Syncthing / unzipped saves:** set `RAW_SAVES_DIR` to mirror every save as plain files on disk — point Syncthing at that folder and edits synced back flow into the next download. See [server/README.md](server/README.md) for details.
+
 Pick the option that fits your situation.
 
 ---

@@ -48,6 +48,19 @@ export function manifestPath(userName: string): string {
   return path.join(userDir(userName), 'manifest.json');
 }
 
+/// Opt-in raw mirror root. Unset/empty = feature disabled.
+export function rawSavesDir(): string | undefined {
+  const raw = process.env.RAW_SAVES_DIR;
+  if (!raw || raw.trim().length === 0) return undefined;
+  return path.resolve(raw.trim());
+}
+
+/// Mirror of a game folder: RAW_SAVES_DIR/<resolvedDir>, the same folder name
+/// as under saves/, so the two trees line up visually and in Syncthing.
+export function rawGameDir(resolvedDir: string): string {
+  return path.join(rawSavesDir()!, resolvedDir);
+}
+
 export function devicesDir(userName: string): string {
   return path.join(userDir(userName), 'devices');
 }

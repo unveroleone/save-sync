@@ -9,12 +9,16 @@
     "dev": "ts-node src/index.ts"
   },
   "dependencies": {
+    "@fastify/multipart": "^8.3.0",
     "fastify": "^4.26.2",
-    "@fastify/multipart": "^8.3.0"
+    "yauzl": "^3.4.0",
+    "yazl": "^3.3.1"
   },
   "devDependencies": {
     "@types/node": "^20.11.30",
-    "typescript": "^5.4.3",
-    "ts-node": "^10.9.2"
+    "@types/yauzl": "^3.4.0",
+    "@types/yazl": "^3.3.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.3"
   }
 }
