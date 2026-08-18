@@ -114,8 +114,9 @@ pub fn sfo_string(folder: &str, key: &str) -> Option<String> {
     let data_off = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
     let count = u32::from_le_bytes(data[16..20].try_into().ok()?) as usize;
 
+    const HEADER_SIZE: usize = 20;
     for i in 0..count {
-        let start = key_off.checked_add(i.checked_mul(16)?)?;
+        let start = HEADER_SIZE.checked_add(i.checked_mul(16)?)?;
         let idx = data.get(start..start.checked_add(16)?)?;
         let koff = key_off.checked_add(u16::from_le_bytes([idx[0], idx[1]]) as usize)?;
         let found = cstr_at(&data, koff)?;
@@ -126,7 +127,13 @@ pub fn sfo_string(folder: &str, key: &str) -> Option<String> {
         let doff = data_off.checked_add(u32::from_le_bytes(idx[12..16].try_into().ok()?) as usize)?;
         let raw = data.get(doff..doff.checked_add(dlen)?)?;
         let value = raw.split(|b| *b == 0).next()?.to_vec();
-        return String::from_utf8(value).ok().filter(|s| !s.is_empty());
+        // Some titles (e.g. multi-line save-icon titles on the original PSP
+        // UI) embed raw newlines; this app renders titles on one line, so
+        // collapse them before they reach any label or upload.
+        return String::from_utf8(value)
+            .ok()
+            .map(|s| s.replace(['\n', '\r'], " ").trim().to_string())
+            .filter(|s| !s.is_empty());
     }
     None
 }
