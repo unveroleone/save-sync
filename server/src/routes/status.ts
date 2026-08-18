@@ -9,7 +9,7 @@ export async function statusRoutes(app: FastifyInstance): Promise<void> {
     }
     reply.send({
       ok: true,
-      serverVersion: '0.1.0',
+      serverVersion: '0.1.7',
       features,
     });
   });
