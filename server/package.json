@@ -1,6 +1,6 @@
 {
   "name": "vita-save-sync-server",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Self-hosted sync server for Save Sync PS Vita app",
   "main": "dist/index.js",
   "scripts": {
