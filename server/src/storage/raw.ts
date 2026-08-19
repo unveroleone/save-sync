@@ -327,3 +327,237 @@ export function rebuildZipFromDir(dir: string, zipPath: string): Promise<void> {
     zip.end();
   });
 }
+
+// --- Flat/shared-root mirror mode ---------------------------------------
+//
+// The functions above assume one raw directory belongs to exactly one
+// title. RetroArch saves break that assumption: each ROM is its own title
+// (so sync/versioning stays per-game), but users expect the *mirror* to
+// look like RetroArch's own layout — files grouped by core, not nested
+// under a wrapper folder per game (see GitHub issue #6 follow-up). RetroArch
+// entry names already encode "savefiles/<core>/<rom>.srm" and are unique
+// per ROM filename, so multiple titles can safely share one root directory
+// as long as every operation is scoped to a specific title's own known
+// paths instead of walking the whole tree.
+//
+// "Known paths" for a title are always re-derived by opening its current
+// zip (zipEntryNames) rather than stored anywhere — the zip is already the
+// source of truth for what that title owns.
+
+/// True for titles whose raw mirror should use the flat/shared-root layout
+/// instead of a per-title wrapper folder. Scoped narrowly to RetroArch: its
+/// entry names are ROM-filename-unique, so collisions across titles sharing
+/// the root are not realistic. Other save sources (PSP, native Vita saves)
+/// can use generic file names and are NOT safe to flatten this way.
+export function isFlatMirrorTitle(titleId: string): boolean {
+  return titleId.startsWith('RETROARCH_');
+}
+
+/// Relative paths of a zip's file entries (directory entries skipped), in
+/// listing order.
+export function zipEntryNames(zipPath: string): Promise<string[]> {
+  return openZip(zipPath).then(
+    (zipfile) =>
+      new Promise<string[]>((resolve, reject) => {
+        const names: string[] = [];
+        const fail = (err: Error) => {
+          try {
+            zipfile.close();
+          } catch {
+            // already closed
+          }
+          reject(err);
+        };
+        zipfile.on('error', fail);
+        zipfile.on('entry', (entry: yauzl.Entry) => {
+          if (!entry.fileName.endsWith('/')) {
+            names.push(entry.fileName);
+          }
+          zipfile.readEntry();
+        });
+        zipfile.on('end', () => resolve(names));
+        zipfile.readEntry();
+      })
+  );
+}
+
+/// Canonical hash over an explicit set of relative paths read from baseDir.
+/// A path that no longer exists is simply excluded — rebuildZipFromPaths
+/// treats a missing path the same way, so both sides of a drift comparison
+/// agree on what "the current content" is when the user deleted a file.
+export function canonicalHashOfPaths(baseDir: string, relPaths: string[]): string {
+  const files: NamedFile[] = [];
+  for (const rel of relPaths) {
+    const full = path.join(baseDir, rel);
+    if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+      files.push({ name: rel, bytes: fs.readFileSync(full) });
+    }
+  }
+  return canonicalHash(files);
+}
+
+/// Extract a zip's entries directly under baseDir at their own path — no
+/// per-title wrapper folder, since baseDir is shared with other titles.
+/// Each file is written via temp+rename (no whole-tree swap, unlike
+/// extractMirror: a directory swap here would delete unrelated titles'
+/// files that happen to live under the same subfolders).
+export function extractMirrorFlat(zipPath: string, baseDir: string): Promise<void> {
+  return openZip(zipPath).then(
+    (zipfile) =>
+      new Promise<void>((resolve, reject) => {
+        let failed = false;
+        const fail = (err: Error) => {
+          failed = true;
+          try {
+            zipfile.close();
+          } catch {
+            // already closed
+          }
+          reject(err);
+        };
+        zipfile.on('error', fail);
+        zipfile.on('entry', (entry: yauzl.Entry) => {
+          if (failed) return;
+          const name = entry.fileName;
+          if (name.endsWith('/')) {
+            zipfile.readEntry();
+            return;
+          }
+          if (unsafeEntryName(name)) {
+            fail(new Error('unsafe zip entry: ' + name));
+            return;
+          }
+          const outPath = path.join(baseDir, name);
+          readEntryBytes(zipfile, entry)
+            .then((bytes) => {
+              fs.mkdirSync(path.dirname(outPath), { recursive: true });
+              const tmp = outPath + '.tmp-' + randomUUID();
+              fs.writeFileSync(tmp, bytes);
+              fs.renameSync(tmp, outPath);
+              zipfile.readEntry();
+            })
+            .catch(fail);
+        });
+        zipfile.on('end', () => resolve());
+        zipfile.readEntry();
+      })
+  );
+}
+
+/// Write a zip from an explicit set of relative paths read from baseDir.
+/// Paths that no longer exist are dropped from the archive — the same
+/// "missing = deleted" semantics as canonicalHashOfPaths.
+export function rebuildZipFromPaths(
+  baseDir: string,
+  relPaths: string[],
+  zipPath: string
+): Promise<void> {
+  const rels = [...relPaths]
+    .filter((rel) => fs.existsSync(path.join(baseDir, rel)))
+    .sort((a, b) => Buffer.from(a, 'utf8').compare(Buffer.from(b, 'utf8')));
+  const tmpPath = zipPath + '.tmp-' + randomUUID();
+  const zip = new yazl.ZipFile();
+  return new Promise<void>((resolve, reject) => {
+    let failed = false;
+    const out = fs.createWriteStream(tmpPath);
+    zip.on('error', (err: Error) => {
+      failed = true;
+      out.destroy();
+      try {
+        fs.rmSync(tmpPath, { force: true });
+      } catch {
+        // tmp already gone
+      }
+      reject(err);
+    });
+    zip.outputStream.pipe(out);
+    out.on('close', () => {
+      if (failed) return;
+      try {
+        fs.renameSync(tmpPath, zipPath);
+        resolve();
+      } catch (err) {
+        try {
+          fs.rmSync(tmpPath, { force: true });
+        } catch {
+          // tmp already gone
+        }
+        reject(err);
+      }
+    });
+    out.on('error', (err) => {
+      failed = true;
+      try {
+        fs.rmSync(tmpPath, { force: true });
+      } catch {
+        // tmp already gone
+      }
+      reject(err);
+    });
+    for (const rel of rels) {
+      zip.addFile(path.join(baseDir, rel), rel);
+    }
+    zip.end();
+  });
+}
+
+/// Scoped Syncthing-temp-file check for the flat mirror: only looks in the
+/// parent directories of this title's own known paths, so one title's
+/// in-flight transfer never blocks unrelated titles sharing the root.
+export function findSyncthingTempFileForPaths(
+  baseDir: string,
+  relPaths: string[]
+): { rel: string; mtimeMs: number } | null {
+  const parents = new Set(relPaths.map((r) => path.dirname(r)));
+  for (const parentRel of parents) {
+    const parentAbs = path.join(baseDir, parentRel);
+    if (!fs.existsSync(parentAbs)) continue;
+    for (const name of fs.readdirSync(parentAbs)) {
+      if (!name.startsWith('.syncthing.')) continue;
+      const full = path.join(parentAbs, name);
+      if (fs.statSync(full).isFile()) {
+        return {
+          rel: parentRel === '.' ? name : `${parentRel}/${name}`,
+          mtimeMs: fs.statSync(full).mtimeMs,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+/// The RetroArch title's ROM-name stem ("RETROARCH_<stem>" -> "<stem>"), or
+/// null if titleId is not a flat-mirror title.
+export function retroarchStemFromTitleId(titleId: string): string | null {
+  const prefix = 'RETROARCH_';
+  return titleId.startsWith(prefix) ? titleId.slice(prefix.length) : null;
+}
+
+/// True when a zip entry's basename stem (the part before its last dot,
+/// same split rule the Vita client uses to group save files by ROM) matches
+/// the given RetroArch stem. The client is trusted to only ever put a
+/// title's own files in its zip, but the flat mirror shares its root
+/// directory across titles, so the server verifies this before writing or
+/// deleting anything there — a malformed upload must not touch another
+/// title's mirrored files.
+export function entryMatchesRetroarchStem(entryName: string, stem: string): boolean {
+  const base = entryName.split('/').pop() ?? entryName;
+  const dot = base.lastIndexOf('.');
+  const entryStem = dot === -1 ? base : base.slice(0, dot);
+  return entryStem === stem;
+}
+
+/// Remove leftover `<path>.tmp-*` siblings for any of the given relPaths,
+/// left behind by a crashed extractMirrorFlat write.
+export function cleanStaleFlatTemps(baseDir: string, relPaths: string[]): void {
+  const parents = new Set(relPaths.map((r) => path.dirname(r)));
+  for (const parentRel of parents) {
+    const parentAbs = path.join(baseDir, parentRel);
+    if (!fs.existsSync(parentAbs)) continue;
+    for (const name of fs.readdirSync(parentAbs)) {
+      if (relPaths.some((r) => name.startsWith(path.basename(r) + '.tmp-'))) {
+        fs.rmSync(path.join(parentAbs, name), { force: true });
+      }
+    }
+  }
+}

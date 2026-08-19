@@ -82,6 +82,13 @@ export interface GameEntry {
   uploadedBy: string;
   size: number;
   versionCount?: number;
+  /// True once the flat-mirror mode (RetroArch titles) has extracted this
+  /// title into the shared RAW_SAVES_DIR root at least once. Distinguishes
+  /// "never mirrored yet" (bootstrap: extract) from "mirrored, then the
+  /// user deleted all files" (propagate: rebuild to an empty/partial zip).
+  /// Directory existence cannot make that distinction for flat titles,
+  /// since the shared root persists after any one title's files are gone.
+  rawMirrored?: boolean;
 }
 
 export function countVersions(userName: string, titleId: string, knownDir?: string): number {

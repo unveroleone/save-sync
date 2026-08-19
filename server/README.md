@@ -69,6 +69,7 @@ RAW_SAVES_DIR=/path/to/raw-saves
 ```
 
 - Every uploaded save is extracted into `$RAW_SAVES_DIR/<TITLEID> - <Game Name>/` as plain files.
+- **RetroArch saves are the exception**: they mirror at `$RAW_SAVES_DIR/savefiles/<core>/<rom>.srm` (and `savestates/...`) with no per-game wrapper folder, matching RetroArch's own on-device layout — this is what makes them fold in with an existing RetroArch Syncthing setup. Each ROM is still tracked and versioned as its own save; only the mirror layout is flattened. Safe because RetroArch save file names are unique per ROM, so games sharing a core folder never collide.
 - Saves uploaded before you enabled the option are extracted on their next download.
 - Point Syncthing at the `RAW_SAVES_DIR` root itself, so Syncthing's own `.stfolder`/`.stversions` folders stay outside the game folders.
 - Keep `RAW_SAVES_DIR` **outside** `DATA_DIR` — the server refuses to start if the two overlap.
@@ -86,6 +87,7 @@ Things to know:
 - Syncthing conflict files (`.sync-conflict-*`) are regular files and get included in rebuilt archives.
 - Symbolic links in the mirror are followed when rebuilding — don't point links at unrelated files.
 - Every upload replaces the mirror folder, which Syncthing sees as delete+add churn even when nothing changed.
+- For RetroArch saves specifically, a file that was never part of a previous upload (e.g. a savestate slot you create by hand directly in the synced folder) is not picked up automatically — only files that already round-tripped once are tracked for edits and deletions. Upload from the Vita once to start tracking it.
 
 ## Production deployment
 
