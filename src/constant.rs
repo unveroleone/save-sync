@@ -50,7 +50,7 @@ pub const TEXT_R: &str = "-> R";
 
 // desktop bottom bar
 pub const DESKTOP_BOTTOM_BAR_TEXT: &str =
-    "(START) Exit    (□) About    (△) Menu    (X) Saves    (SEL) Refresh";
+    "(START) Exit    (△) Menu    (X) Saves    (□) Sync    (〇) Sync All    (SEL) Refresh";
 pub const DESKTOP_BOTTOM_BAR_CLOUD_TEXT: &str =
     "(START) Exit  (X) Action  (□) Sync All  (△) Settings  (SEL) Refresh";
 
@@ -99,6 +99,3 @@ pub const DIALOG_CANCEL_TEXT: &str = "(〇) Cancel";
 
 // shown in the loading dialog while a bulk run is interruptible
 pub const CANCEL_HINT: &str = "(〇) Stop";
-
-// about dialog text
-pub const ABOUT_TEXT: &str = "Save Sync — Two-Vita save sync tool by unveroleone"; 

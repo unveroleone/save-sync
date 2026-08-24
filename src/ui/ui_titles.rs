@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
-    sync::{Arc, RwLock},
+    sync::{atomic::Ordering, Arc, RwLock},
 };
 
 use log::error;
@@ -10,8 +10,10 @@ use log::error;
 use crate::{
     app::AppData,
     config::Config,
-    constant::{ABOUT_TEXT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
+    constant::{GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
     emulator::{scan_emulator_entries, EmulatorEntry, EmulatorKind},
+    sync::SyncStatus,
+    sync_engine::{SyncEngine, SyncGameInfo},
     tai::Title,
     utils::get_active_color,
     vita2d::{
@@ -23,7 +25,7 @@ use crate::{
 
 use self::{game_menu::GameMenu, save_menu::SaveMenu};
 
-use super::{ui_base::UIBase, ui_dialog::UIDialog};
+use super::{ui_base::UIBase, ui_loading::Loading, ui_toast::Toast};
 
 pub mod game_menu;
 pub mod save_menu;
@@ -48,6 +50,7 @@ pub struct UITitles {
     visible_native: Vec<i32>,
     /// Set by `invalidate()`, which has no AppData to refresh with itself.
     needs_sync_refresh: bool,
+    sync_engine: SyncEngine,
 }
 
 impl UITitles {
@@ -63,7 +66,28 @@ impl UITitles {
             emulators_loaded: false,
             visible_native: Vec::new(),
             needs_sync_refresh: false,
+            sync_engine: SyncEngine::new(),
         }
+    }
+
+    /// SyncGameInfo for the currently selected grid cell, if the background
+    /// fetch has reached it yet.
+    fn current_sync_game(&self, app_data: &AppData) -> Option<SyncGameInfo> {
+        let id = if self.selected_idx < self.native_count() {
+            self.native_title(app_data, self.selected_idx)?
+                .title_id()
+                .to_string()
+        } else {
+            let emu_idx = (self.selected_idx - self.native_count()) as usize;
+            self.emulator_entries.get(emu_idx)?.id.clone()
+        };
+        self.sync_engine
+            .games
+            .read()
+            .unwrap()
+            .iter()
+            .find(|g| g.title_id == id)
+            .cloned()
     }
 
     fn filter_excluded_emulators(entries: Vec<EmulatorEntry>, config: &Config) -> Vec<EmulatorEntry> {
@@ -89,6 +113,7 @@ impl UITitles {
             .collect();
         self.icons.clear();
         self.icon_bufs.write().unwrap().clear();
+        self.sync_engine.games.write().unwrap().clear();
         let total = self.total_size(app_data);
         self.selected_idx = self.selected_idx.min((total - 1).max(0));
     }
@@ -359,12 +384,51 @@ impl UITitles {
         );
     }
 
+    /// Colored badge in a cell's corner, word-wrapped onto up to 2 short
+    /// lines so it reads on sight without a legend, even in an 86px cell.
+    fn draw_sync_badge(x: i32, y: i32, cell_size: i32, status: &SyncStatus) {
+        let lines: &[&str] = match status {
+            SyncStatus::InSync => &["Synced"],
+            SyncStatus::UploadNeeded | SyncStatus::LocalOnly => &["Upload", "Needed"],
+            SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => &["Download", "Needed"],
+            SyncStatus::Conflict => &["Conflict"],
+        };
+        let scale = 0.9;
+        let metrics: Vec<(i32, i32)> = lines
+            .iter()
+            .map(|l| (vita2d_text_width(scale, l), vita2d_text_height(scale, l)))
+            .collect();
+        let bw = metrics.iter().map(|(w, _)| *w).max().unwrap_or(0) + 6;
+        let bh: i32 = metrics.iter().map(|(_, h)| h + 2).sum::<i32>() + 2;
+        let bx = x + cell_size - bw;
+        let by = y;
+        // Translucent so the icon underneath still shows through.
+        vita2d_draw_rect(
+            bx as f32,
+            by as f32,
+            bw as f32,
+            bh as f32,
+            SyncEngine::status_color_alpha(status, 0xd0),
+        );
+        let mut cursor_y = by + 1;
+        for (line, (w, h)) in lines.iter().zip(metrics.iter()) {
+            cursor_y += h;
+            vita2d_draw_text(bx + (bw - w) / 2, cursor_y, rgba(0xff, 0xff, 0xff, 0xff), scale, line);
+            cursor_y += 2;
+        }
+    }
+
     pub fn draw_game_list(&self, app_data: &AppData) {
         let icon_bg = rgba(0x44, 0x44, 0x44, 0xff);
         let native_count = self.native_count();
         let total = self.total_size(app_data);
         let start_idx = self.top_row * ICON_COL;
         let end_idx = (start_idx + ICON_COL * ICON_ROW).min(total);
+        let sync_games = self.sync_engine.games.read().unwrap();
+        let status_by_id: HashMap<&str, &SyncStatus> = sync_games
+            .iter()
+            .map(|g| (g.title_id.as_str(), &g.status))
+            .collect();
 
         for idx in 0..(ICON_COL * ICON_ROW) as i32 {
             if start_idx + idx >= end_idx {
@@ -388,6 +452,11 @@ impl UITitles {
                         cell_size as f32 / 128.0,
                         cell_size as f32 / 128.0,
                     );
+                }
+                if let Some(title) = self.native_title(app_data, icon_idx as i32) {
+                    if let Some(status) = status_by_id.get(title.title_id()) {
+                        Self::draw_sync_badge(x, y, cell_size, status);
+                    }
                 }
             } else {
                 // emulator cell
@@ -441,6 +510,9 @@ impl UITitles {
                             label,
                         );
                     }
+                    if let Some(status) = status_by_id.get(entry.id.as_str()) {
+                        Self::draw_sync_badge(x, y, cell_size, status);
+                    }
                 }
             }
         }
@@ -469,6 +541,8 @@ impl UIBase for UITitles {
             self.needs_sync_refresh = false;
         }
 
+        self.sync_engine.pump();
+
         let native_count = self.native_count();
 
         // update icons texture (native titles only)
@@ -491,6 +565,18 @@ impl UIBase for UITitles {
             }
             if self.game_menu.take_sync_exclusion_changed() {
                 self.refresh_sync_filters(app_data);
+            }
+        } else if self.sync_engine.pending.load(Ordering::Relaxed) {
+            // Sync (single or all) holds all input, so circle is free to
+            // mean "stop". No confirmation dialog: it would block the main
+            // loop mid-run.
+            if is_button(buttons, SceCtrlButtons::SceCtrlCircle)
+                && !self.sync_engine.cancel.swap(true, Ordering::Relaxed)
+            {
+                Toast::show("Stopping after this game...".to_string());
+            }
+            if !Loading::is_pending() {
+                self.sync_engine.pending.store(false, Ordering::Relaxed);
             }
         } else {
             let total = self.total_size(app_data);
@@ -530,12 +616,27 @@ impl UIBase for UITitles {
                 }
             }
             if is_button(buttons, SceCtrlButtons::SceCtrlSquare) {
-                UIDialog::present_about(ABOUT_TEXT);
+                if let Some(game) = self.current_sync_game(app_data) {
+                    self.sync_engine.per_game_action(&game);
+                } else {
+                    Toast::show("Sync status not loaded yet.".to_string());
+                }
+            }
+            if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+                self.sync_engine.sync_all();
             }
             if is_button(buttons, SceCtrlButtons::SceCtrlSelect) {
                 self.refresh_sync_filters(app_data);
             }
             UITitles::update_selected(self, app_data, buttons);
+        }
+
+        // Background sync-status fetch. Non-blocking: the grid itself never
+        // waits on it, badges just pop in once it lands.
+        if self.sync_engine.games.read().unwrap().is_empty()
+            && !self.sync_engine.pending.load(Ordering::Relaxed)
+        {
+            self.sync_engine.fetch(&app_data.titles);
         }
 
         if !self.save_menu.is_active() {
@@ -556,7 +657,9 @@ impl UIBase for UITitles {
     }
 
     fn is_forces(&self) -> bool {
-        self.save_menu.is_forces() || self.game_menu.is_forces()
+        self.save_menu.is_forces()
+            || self.game_menu.is_forces()
+            || self.sync_engine.pending.load(Ordering::Relaxed)
     }
 
     fn invalidate(&mut self) {

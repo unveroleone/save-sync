@@ -655,13 +655,25 @@ impl SyncEngine {
         newest.map(|(p, _)| p)
     }
 
-    pub fn status_color(status: &SyncStatus) -> u32 {
+    fn status_rgb(status: &SyncStatus) -> (i32, i32, i32) {
         match status {
-            SyncStatus::InSync => rgba(0x44, 0xcc, 0x44, 0xff),
-            SyncStatus::UploadNeeded | SyncStatus::LocalOnly => rgba(0x44, 0x88, 0xff, 0xff),
-            SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => rgba(0xff, 0xaa, 0x44, 0xff),
-            SyncStatus::Conflict => rgba(0xff, 0x44, 0x44, 0xff),
+            SyncStatus::InSync => (0x44, 0xcc, 0x44),
+            SyncStatus::UploadNeeded | SyncStatus::LocalOnly => (0x44, 0x88, 0xff),
+            SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => (0xff, 0xaa, 0x44),
+            SyncStatus::Conflict => (0xff, 0x44, 0x44),
         }
+    }
+
+    pub fn status_color(status: &SyncStatus) -> u32 {
+        let (r, g, b) = Self::status_rgb(status);
+        rgba(r, g, b, 0xff)
+    }
+
+    /// Same palette, custom alpha — for overlays drawn on top of other
+    /// content (e.g. a badge sitting over a game icon).
+    pub fn status_color_alpha(status: &SyncStatus, a: i32) -> u32 {
+        let (r, g, b) = Self::status_rgb(status);
+        rgba(r, g, b, a)
     }
 
     pub fn status_label(status: &SyncStatus, version_count: u64) -> String {
