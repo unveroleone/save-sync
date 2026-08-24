@@ -6,7 +6,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, RwLock,
+        Arc,
     },
 };
 
@@ -18,7 +18,7 @@ use crate::{
     constant::{CANCEL_HINT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR, SCREEN_WIDTH},
     emulator::{scan_emulator_entries, EmulatorEntry, EmulatorKind},
     ime::get_current_format_time,
-    tai::{mount_pfs, psv_launch_app_by_title_id, unmount_pfs, Title, Titles},
+    tai::{mount_pfs, psv_launch_app_by_title_id, unmount_pfs, PfsMountHandshake, Title, Titles},
     ui::{
         list_state::ListState, ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast,
     },
@@ -83,38 +83,6 @@ fn bulk_result_message(verb: &str, done: usize, failed: usize, cancelled: bool) 
     }
 }
 
-/// Park until the main thread mounts `game_save_dir`. Only the main thread may
-/// mount, so the worker asks and waits. Returns false when the run was
-/// cancelled while waiting, in which case nothing was mounted and the caller
-/// must not touch the save.
-fn wait_for_mount(
-    on_mounted: &Arc<RwLock<Option<String>>>,
-    prepare_to_mount: &Arc<RwLock<Option<String>>>,
-    cancel: &Arc<AtomicBool>,
-    game_save_dir: &str,
-) -> bool {
-    let mut is_prepare = false;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return false;
-        }
-        if let Ok(mounted) = on_mounted.try_read() {
-            if let Some(mounted) = mounted.as_ref() {
-                if mounted == game_save_dir {
-                    return true;
-                }
-            }
-        }
-        if !is_prepare {
-            if let Ok(mut prepare) = prepare_to_mount.try_write() {
-                is_prepare = true;
-                *prepare = Some(game_save_dir.to_string());
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
 /// Hash and upload one finished backup. Failures are logged and reported to the
 /// caller so a bulk run can keep going. `title` labels the save on the server
 /// (empty skips the label).
@@ -164,8 +132,7 @@ pub struct GameList {
     /// Active folder picker: (folder name, included). PSP entries with more
     /// than one folder can exclude install/DLC data from backups.
     folder_picker: Option<Vec<(String, bool)>>,
-    game_save_dir_prepare_to_mount: Arc<RwLock<Option<String>>>,
-    game_save_dir_on_mounted: Arc<RwLock<Option<String>>>,
+    pfs_mount: PfsMountHandshake,
     cancel: Arc<AtomicBool>,
     sync_exclusion_changed: bool,
 }
@@ -178,8 +145,7 @@ impl GameList {
             list: Vec::new(),
             mode: GameListMode::Native,
             folder_picker: None,
-            game_save_dir_prepare_to_mount: Arc::new(RwLock::new(None)),
-            game_save_dir_on_mounted: Arc::new(RwLock::new(None)),
+            pfs_mount: PfsMountHandshake::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             sync_exclusion_changed: false,
         };
@@ -249,7 +215,7 @@ impl GameList {
         pending.store(true, Ordering::Relaxed);
         Loading::show();
         unmount_pfs();
-        self.clear_mounted_state();
+        self.pfs_mount.clear();
         tokio::spawn(async move {
             let dirs = [
                 format!("{}/{}", GAME_CARD_SAVE_DIR, real_id),
@@ -356,10 +322,9 @@ impl GameList {
             .collect::<Vec<(String, String, String)>>();
 
         // Start from a known state so the first game always gets a fresh mount.
-        self.clear_mounted_state();
+        self.pfs_mount.clear();
         self.cancel.store(false, Ordering::Relaxed);
-        let game_save_dir_on_mounted = Arc::clone(&self.game_save_dir_on_mounted);
-        let game_save_dir_prepare_to_mount = Arc::clone(&self.game_save_dir_prepare_to_mount);
+        let pfs_mount = self.pfs_mount.clone();
         let cancel = Arc::clone(&self.cancel);
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
@@ -382,12 +347,7 @@ impl GameList {
                     Some(dir) => dir.to_string(),
                     None => continue,
                 };
-                if !wait_for_mount(
-                    &game_save_dir_on_mounted,
-                    &game_save_dir_prepare_to_mount,
-                    &cancel,
-                    &game_save_dir,
-                ) {
+                if !pfs_mount.wait_for_mount(&cancel, &game_save_dir) {
                     cancelled = true;
                     break;
                 }
@@ -453,10 +413,9 @@ impl GameList {
         }
 
         // Start from a known state so the first game always gets a fresh mount.
-        self.clear_mounted_state();
+        self.pfs_mount.clear();
         self.cancel.store(false, Ordering::Relaxed);
-        let game_save_dir_on_mounted = Arc::clone(&self.game_save_dir_on_mounted);
-        let game_save_dir_prepare_to_mount = Arc::clone(&self.game_save_dir_prepare_to_mount);
+        let pfs_mount = self.pfs_mount.clone();
         let cancel = Arc::clone(&self.cancel);
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
@@ -484,12 +443,7 @@ impl GameList {
                     None => continue,
                 };
 
-                if !wait_for_mount(
-                    &game_save_dir_on_mounted,
-                    &game_save_dir_prepare_to_mount,
-                    &cancel,
-                    &game_save_dir,
-                ) {
+                if !pfs_mount.wait_for_mount(&cancel, &game_save_dir) {
                     cancelled = true;
                     break;
                 }
@@ -635,32 +589,6 @@ impl GameList {
         });
     }
 
-    /// Forget which save is mounted. Anything that unmounts must call this, or
-    /// a later bulk run sees a stale match, skips its mount request and
-    /// archives an unmounted directory.
-    fn clear_mounted_state(&self) {
-        *self.game_save_dir_on_mounted.write().unwrap() = None;
-        *self.game_save_dir_prepare_to_mount.write().unwrap() = None;
-    }
-
-    pub fn mount_game_dir_if_exists(&self) {
-        let prepare_dir = match self.game_save_dir_prepare_to_mount.try_write() {
-            Ok(mut prepare_dir) => {
-                if prepare_dir.is_none() {
-                    None
-                } else {
-                    Some(prepare_dir.take().unwrap())
-                }
-            }
-            _ => None,
-        };
-
-        if let Some(prepare_dir) = prepare_dir {
-            mount_pfs(&prepare_dir);
-            *self.game_save_dir_on_mounted.write().unwrap() = Some(prepare_dir);
-        }
-    }
-
     pub fn update(
         &mut self,
         buttons: u32,
@@ -668,7 +596,7 @@ impl GameList {
         titles: &Titles,
         emu: Option<&EmulatorEntry>,
     ) {
-        self.mount_game_dir_if_exists();
+        self.pfs_mount.pump();
 
         if self.is_pending() {
             // A bulk run holds all input, so circle is free to mean "stop".
@@ -816,7 +744,7 @@ impl GameList {
                                     Toast::show("Account ID update failed!".to_string());
                                 }
                                 unmount_pfs();
-                                self.clear_mounted_state();
+                                self.pfs_mount.clear();
                                 return true;
                             }
                             false
