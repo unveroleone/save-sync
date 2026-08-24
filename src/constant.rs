@@ -51,8 +51,7 @@ pub const TEXT_R: &str = "-> R";
 // desktop bottom bar
 pub const DESKTOP_BOTTOM_BAR_TEXT: &str =
     "(START) Exit    (△) Menu    (X) Saves    (□) Sync    (〇) Sync All    (SEL) Refresh";
-pub const DESKTOP_BOTTOM_BAR_CLOUD_TEXT: &str =
-    "(START) Exit  (X) Action  (□) Sync All  (△) Settings  (SEL) Refresh";
+pub const DESKTOP_BOTTOM_BAR_SETTINGS_TEXT: &str = "(X) Edit    (〇) Back";
 
 // save drawer (local tab)
 pub const SAVE_DRAWER_BOTTOM_BAR_TEXT: &str =

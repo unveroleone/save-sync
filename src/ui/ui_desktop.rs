@@ -5,8 +5,9 @@ use std::{
 
 use crate::{
     app::AppData,
+    config::Config,
     constant::{
-        DESKTOP_BOTTOM_BAR_CLOUD_TEXT, DESKTOP_BOTTOM_BAR_TEXT, SCREEN_HEIGHT, SCREEN_WIDTH,
+        DESKTOP_BOTTOM_BAR_SETTINGS_TEXT, DESKTOP_BOTTOM_BAR_TEXT, SCREEN_HEIGHT, SCREEN_WIDTH,
         TEXT_L, TEXT_R,
     },
     vita2d::{
@@ -16,11 +17,11 @@ use crate::{
     },
 };
 
-use super::ui_base::UIBase;
+use super::{ui_base::UIBase, ui_settings::UISettings};
 
 const IMAGE_ICON_PATH: &str = "app0:sce_sys/resources/icon.png";
 const IMAGE_DEVICE_PATH: &str = "app0:sce_sys/resources/device.png";
-const IMAGE_CLOUD_PATH: &str = "app0:sce_sys/resources/cloud.png";
+const IMAGE_SETTINGS_PATH: &str = "app0:sce_sys/resources/settings.png";
 const IMAGE_DEVICE_BG_PATH: &str = "app0:sce_sys/resources/device_bg.jpg";
 const ICON_SIZE: i32 = 70;
 const ICON_OFFSET: i32 = 10;
@@ -30,16 +31,18 @@ const TEXT_CREDIT: &str = "by unveroleone";
 
 pub struct UIDesktop {
     selected_idx: i32,
-    pub children: [Box<dyn UIBase>; 2],
+    pub games: Box<dyn UIBase>,
+    settings: Option<UISettings>,
     pub assets: Vec<Vita2dTexture>,
     asset_bufs: Arc<RwLock<Option<Vec<Vec<u8>>>>>,
 }
 
 impl UIDesktop {
-    pub fn new(children: [Box<dyn UIBase>; 2]) -> UIDesktop {
+    pub fn new(games: Box<dyn UIBase>) -> UIDesktop {
         let res = UIDesktop {
             selected_idx: 0,
-            children,
+            games,
+            settings: None,
             assets: vec![],
             asset_bufs: Arc::new(RwLock::new(None)),
         };
@@ -55,7 +58,7 @@ impl UIDesktop {
                 IMAGE_DEVICE_BG_PATH,
                 IMAGE_ICON_PATH,
                 IMAGE_DEVICE_PATH,
-                IMAGE_CLOUD_PATH,
+                IMAGE_SETTINGS_PATH,
             ]
             .into_iter()
             {
@@ -155,7 +158,7 @@ impl UIDesktop {
         }
     }
 
-    fn draw_cloud(&self) {
+    fn draw_settings_icon(&self) {
         if self.assets.len() > 3 {
             vita2d_draw_texture(
                 &self.assets[3],
@@ -185,6 +188,18 @@ impl UIDesktop {
         );
     }
 
+    fn settings_forces(&self) -> bool {
+        self.settings.as_ref().map(|s| s.is_forces()).unwrap_or(false)
+    }
+
+    /// Drop the settings screen, return to the Games tab, and pick up
+    /// whatever changed while it was open (e.g. sync exclusions).
+    fn leave_settings(&mut self) {
+        self.settings = None;
+        self.selected_idx = 0;
+        self.games.invalidate();
+    }
+
     fn draw_bottom_bar(&self) {
         vita2d_line(
             0.0,
@@ -196,7 +211,7 @@ impl UIDesktop {
         let bottom_bar_text = if self.selected_idx == 0 {
             DESKTOP_BOTTOM_BAR_TEXT
         } else {
-            DESKTOP_BOTTOM_BAR_CLOUD_TEXT
+            DESKTOP_BOTTOM_BAR_SETTINGS_TEXT
         };
         vita2d_draw_text(
             SCREEN_WIDTH - 12 - vita2d_text_width(1.0, bottom_bar_text),
@@ -210,32 +225,48 @@ impl UIDesktop {
 
 impl UIBase for UIDesktop {
     fn is_forces(&self) -> bool {
-        self.children.iter().any(|child| child.is_forces())
+        self.games.is_forces() || self.settings_forces()
     }
 
     fn update(&mut self, app_data: &mut AppData, buttons: u32) {
         // update textures
         UIDesktop::init_assets_textures(self);
 
-        // action
-        let active_child = &mut self.children[self.selected_idx as usize];
-        if active_child.is_forces() {
-            active_child.update(app_data, buttons);
-        } else {
-            active_child.update(app_data, buttons);
-            if !(is_button(buttons, SceCtrlButtons::SceCtrlLtrigger)
-                && is_button(buttons, SceCtrlButtons::SceCtrlRtrigger))
-            {
-                let prev = self.selected_idx;
-                if is_button(buttons, SceCtrlButtons::SceCtrlLtrigger) {
-                    self.selected_idx = 0;
-                } else if is_button(buttons, SceCtrlButtons::SceCtrlRtrigger) {
-                    self.selected_idx = 1;
-                }
-                if self.selected_idx != prev {
-                    self.children[self.selected_idx as usize].invalidate();
-                }
+        // Entering the settings tab: construct fresh from the current
+        // config so it never shows stale state from a previous visit (and
+        // never clobbers a change made elsewhere, e.g. an exclusion toggled
+        // from the Games tab's own menu while Settings was last open).
+        if self.selected_idx == 1 && self.settings.is_none() {
+            self.settings = Some(UISettings::new(&Config::global()));
+        }
+
+        let forces = if self.selected_idx == 0 {
+            self.games.update(app_data, buttons);
+            self.games.is_forces()
+        } else if let Some(settings) = &mut self.settings {
+            settings.update(app_data, buttons);
+            if settings.should_close {
+                self.leave_settings();
+                false
+            } else {
+                settings.is_forces()
             }
+        } else {
+            false
+        };
+
+        if forces {
+            return;
+        }
+        let both_held = is_button(buttons, SceCtrlButtons::SceCtrlLtrigger)
+            && is_button(buttons, SceCtrlButtons::SceCtrlRtrigger);
+        if both_held {
+            return;
+        }
+        if self.selected_idx == 1 && is_button(buttons, SceCtrlButtons::SceCtrlLtrigger) {
+            self.leave_settings();
+        } else if self.selected_idx == 0 && is_button(buttons, SceCtrlButtons::SceCtrlRtrigger) {
+            self.selected_idx = 1;
         }
     }
 
@@ -252,13 +283,21 @@ impl UIBase for UIDesktop {
         self.draw_icon();
         // draw device
         self.draw_device();
-        // draw cloud
-        self.draw_cloud();
-        // draw selected child (draw first so bottom bar renders on top)
-        (self.children[self.selected_idx as usize]).draw(app_data);
+        // draw settings tab icon
+        self.draw_settings_icon();
 
-        // skip desktop bottom bar when child owns the full screen (e.g. settings overlay)
-        if !self.children[self.selected_idx as usize].is_forces() {
+        // draw selected child (draw first so bottom bar renders on top)
+        let child_forces = if self.selected_idx == 0 {
+            self.games.draw(app_data);
+            self.games.is_forces()
+        } else if let Some(settings) = &self.settings {
+            settings.draw(app_data);
+            settings.is_forces()
+        } else {
+            false
+        };
+
+        if !child_forces {
             self.draw_bottom_bar();
         }
     }
