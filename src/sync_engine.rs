@@ -11,14 +11,15 @@ use log::error;
 use crate::{
     api::{Api, CloudManifest},
     config::Config,
-    constant::CANCEL_HINT,
+    constant::{CANCEL_HINT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
     emulator::{emulator_kind_from_entry_id, scan_emulator_entries},
     sync::{status_for, LocalManifest, SyncStatus},
-    tai::Titles,
+    tai::{PfsMountHandshake, Titles},
     ui::{ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast},
     utils::{
-        get_game_local_backup_dir, read_content_hash_sidecar, restore_save_target,
-        save_target_for_downloaded_archive, sha256_file,
+        backup_game_save, backup_save_target, get_game_local_backup_dir,
+        read_content_hash_sidecar, restore_save_target, save_target_for_downloaded_archive,
+        sha256_file,
     },
     vita2d::rgba,
 };
@@ -34,6 +35,10 @@ pub struct SyncGameInfo {
     pub server_title: String,
     /// Resolved once here so every action reads the same directory.
     pub local_dir: String,
+    /// Native Vita titles only: the id used to locate GAME_CARD_SAVE_DIR /
+    /// GAME_SAVE_DIR, distinct from `title_id`. None for emulator and
+    /// pure-cloud entries.
+    pub real_id: Option<String>,
     pub status: SyncStatus,
     pub local_time: Option<String>,
     pub cloud_time: Option<String>,
@@ -48,6 +53,7 @@ pub struct SyncEngine {
     pub cancel: Arc<AtomicBool>,
     pub cloud_manifest: Arc<RwLock<Option<CloudManifest>>>,
     pub fetch_at: Arc<RwLock<u64>>,
+    pub pfs_mount: PfsMountHandshake,
 }
 
 impl SyncEngine {
@@ -58,7 +64,14 @@ impl SyncEngine {
             cancel: Arc::new(AtomicBool::new(false)),
             cloud_manifest: Arc::new(RwLock::new(None)),
             fetch_at: Arc::new(RwLock::new(0)),
+            pfs_mount: PfsMountHandshake::new(),
         }
+    }
+
+    /// Main-thread side of the PFS mount handshake; call once per frame once
+    /// this engine is wired into a screen.
+    pub fn pump(&self) {
+        self.pfs_mount.pump();
     }
 
     pub fn fetch(&self, titles: &Titles) {
@@ -69,9 +82,15 @@ impl SyncEngine {
         let config = Config::global();
         let is_configured = config.is_configured();
 
-        let title_list: Vec<(String, String)> = titles
+        let title_list: Vec<(String, String, String)> = titles
             .iter()
-            .map(|t| (t.title_id().to_string(), t.name().to_string()))
+            .map(|t| {
+                (
+                    t.title_id().to_string(),
+                    t.real_id().to_string(),
+                    t.name().to_string(),
+                )
+            })
             .collect();
 
         // Include emulator entries (PSP, RetroArch) so they appear in the cloud list.
@@ -96,18 +115,25 @@ impl SyncEngine {
 
             // Build per-game info, dropping sync-excluded entries.
             let mut info_list = Vec::new();
-            for (title_id, name) in &title_list {
+            for (title_id, real_id, name) in &title_list {
                 if config.is_effectively_excluded(title_id, None) {
                     continue;
                 }
                 let local_dir = get_game_local_backup_dir(title_id, name);
-                let info = Self::build_sync_info(title_id, name, name, &local_dir, &manifest);
+                let info = Self::build_sync_info(
+                    title_id,
+                    Some(real_id.as_str()),
+                    name,
+                    name,
+                    &local_dir,
+                    &manifest,
+                );
                 info_list.push(info);
             }
 
             // Emulator entries
             let mut seen_ids: std::collections::HashSet<String> =
-                title_list.iter().map(|(id, _)| id.clone()).collect();
+                title_list.iter().map(|(id, _, _)| id.clone()).collect();
             for entry in &emu_entries {
                 seen_ids.insert(entry.id.clone()); // even if excluded below
                 if config.is_effectively_excluded(&entry.id, Some(entry.kind)) {
@@ -116,6 +142,7 @@ impl SyncEngine {
                 let local_dir = entry.local_backup_dir();
                 let info = Self::build_sync_info(
                     &entry.id,
+                    None,
                     &entry.name,
                     &entry.server_title,
                     &local_dir,
@@ -135,7 +162,8 @@ impl SyncEngine {
                             .filter(|t| !t.is_empty())
                             .unwrap_or_else(|| id.clone());
                         let local_dir = get_game_local_backup_dir(id, id);
-                        let info = Self::build_sync_info(id, &display_name, "", &local_dir, &manifest);
+                        let info =
+                            Self::build_sync_info(id, None, &display_name, "", &local_dir, &manifest);
                         info_list.push(info);
                     }
                 }
@@ -155,6 +183,7 @@ impl SyncEngine {
 
     fn build_sync_info(
         title_id: &str,
+        real_id: Option<&str>,
         name: &str,
         server_title: &str,
         local_dir: &str,
@@ -180,6 +209,7 @@ impl SyncEngine {
             name: name.to_string(),
             server_title: server_title.to_string(),
             local_dir: local_dir.to_string(),
+            real_id: real_id.map(str::to_string),
             status,
             local_time,
             cloud_time: cloud_data.map(|c| c.latest_version.clone()),
@@ -375,7 +405,6 @@ impl SyncEngine {
             .filter(|g| {
                 config.upload_on_sync_all
                     && matches!(g.status, SyncStatus::UploadNeeded | SyncStatus::LocalOnly)
-                    && g.has_local_backup
             })
             .cloned()
             .collect();
@@ -416,6 +445,10 @@ impl SyncEngine {
         pending.store(true, Ordering::Relaxed);
         self.cancel.store(false, Ordering::Relaxed);
         let cancel = Arc::clone(&self.cancel);
+        // Start from a known state so the first game that needs a fresh
+        // backup always gets a fresh mount.
+        self.pfs_mount.clear();
+        let pfs_mount = self.pfs_mount.clone();
         Loading::show();
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
         let games_arc = Arc::clone(&self.games);
@@ -439,10 +472,14 @@ impl SyncEngine {
                     CANCEL_HINT
                 ));
                 Loading::notify_desc(game.name.to_string());
-                let zip_path = match Self::find_newest_zip(&game.local_dir) {
-                    Some(path) => path,
-                    None => {
-                        failures.push((game.title_id.clone(), "no local backup".to_string()));
+                let zip_path = match Self::ensure_backup(game, &pfs_mount, &cancel) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        if err == "cancelled" {
+                            cancelled = true;
+                            break;
+                        }
+                        failures.push((game.title_id.clone(), err));
                         continue;
                     }
                 };
@@ -493,14 +530,21 @@ impl SyncEngine {
                     game.local_dir,
                     crate::ime::get_current_format_time()
                 );
-                // Deliberately no extract here. Sync All is a bulk action, so it
-                // only fetches archives into the backup dir; writing them into
-                // SAVEDATA would overwrite live saves with no confirmation and
-                // no auto-backup. Restoring stays an explicit per-game choice.
                 match Api::download_save(&config, &game.title_id, &dl_path) {
                     Ok(_) => {
                         downloaded.push((game.title_id.clone(), dl_path.clone()));
                         ok += 1;
+                        // PSP/RetroArch restore through the normal path, which
+                        // auto-backs-up the live save first. Native titles stay
+                        // download-only: restoring them needs a PFS mount from
+                        // the Games tab (out of scope here, see plan doc).
+                        if let Some(target) =
+                            save_target_for_downloaded_archive(&game.title_id, &dl_path)
+                        {
+                            if let Err(e) = restore_save_target(&target, &dl_path) {
+                                error!("restore {} failed: {}", game.title_id, e);
+                            }
+                        }
                     }
                     Err(e) => {
                         error!("download {} failed: {}", game.title_id, e);
@@ -543,6 +587,49 @@ impl SyncEngine {
                 games.clear();
             }
         });
+    }
+
+    /// Newest local zip for `game`, creating one first if none exists yet.
+    /// Mirrors the old game-menu "Backup All to Server", which never skipped
+    /// a title just because it had never been backed up before.
+    fn ensure_backup(
+        game: &SyncGameInfo,
+        pfs_mount: &PfsMountHandshake,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<String, String> {
+        if let Some(path) = Self::find_newest_zip(&game.local_dir) {
+            return Ok(path);
+        }
+        let backup_to_path = format!(
+            "{}/{}.zip",
+            game.local_dir,
+            crate::ime::get_current_format_time()
+        );
+        if let Some(real_id) = &game.real_id {
+            let dirs = [
+                format!("{}/{}", GAME_CARD_SAVE_DIR, real_id),
+                format!("{}/{}", GAME_SAVE_DIR, real_id),
+            ];
+            let game_save_dir = dirs
+                .iter()
+                .find(|dir| Path::new(dir).exists())
+                .ok_or_else(|| "no save data".to_string())?;
+            if !pfs_mount.wait_for_mount(cancel, game_save_dir) {
+                return Err("cancelled".to_string());
+            }
+            backup_game_save(game_save_dir, &backup_to_path).map_err(|e| format!("{:?}", e))?;
+            return Ok(backup_to_path);
+        }
+        if let Some(entry) = scan_emulator_entries()
+            .into_iter()
+            .find(|e| e.id == game.title_id)
+        {
+            let exclusions = Config::global().psp_exclusions_for(&entry.id);
+            backup_save_target(&entry.save_target_excluding(&exclusions), &backup_to_path)
+                .map_err(|e| format!("{:?}", e))?;
+            return Ok(backup_to_path);
+        }
+        Err("no local backup".to_string())
     }
 
     fn find_newest_zip(dir: &str) -> Option<String> {
