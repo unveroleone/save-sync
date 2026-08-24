@@ -24,9 +24,6 @@ use crate::{
     vita2d::rgba,
 };
 
-/// Not yet wired into any screen (Stage 2 of the tab-unification plan). Moved
-/// here as-is from UICloud so the Games tab and a unified sync screen can
-/// share it later without depending on ui_cloud.
 #[derive(Clone)]
 pub struct SyncGameInfo {
     pub title_id: String,
@@ -54,6 +51,10 @@ pub struct SyncEngine {
     pub cloud_manifest: Arc<RwLock<Option<CloudManifest>>>,
     pub fetch_at: Arc<RwLock<u64>>,
     pub pfs_mount: PfsMountHandshake,
+    /// False until a fetch has actually succeeded, and again whenever one
+    /// fails. `games` is only trustworthy while this is true — badges and
+    /// sync actions must not act on data we couldn't confirm is current.
+    pub data_valid: Arc<AtomicBool>,
 }
 
 impl SyncEngine {
@@ -65,6 +66,7 @@ impl SyncEngine {
             cloud_manifest: Arc::new(RwLock::new(None)),
             fetch_at: Arc::new(RwLock::new(0)),
             pfs_mount: PfsMountHandshake::new(),
+            data_valid: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -77,6 +79,12 @@ impl SyncEngine {
     pub fn fetch(&self, titles: &Titles) {
         if Arc::strong_count(&self.games) > 1 {
             return; // already fetching
+        }
+        // Throttle retries after a failed attempt so a dead connection
+        // doesn't get hammered once per frame while `games` stays empty.
+        let last_attempt = *self.fetch_at.read().unwrap();
+        if last_attempt > 0 && crate::utils::current_time() as u64 - last_attempt < 5 {
+            return;
         }
 
         let config = Config::global();
@@ -99,14 +107,29 @@ impl SyncEngine {
         let games = Arc::clone(&self.games);
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
         let fetch_at = Arc::clone(&self.fetch_at);
+        let data_valid = Arc::clone(&self.data_valid);
 
         tokio::spawn(async move {
             let manifest = if is_configured {
                 match Api::get_cloud_manifest(&config) {
                     Ok(m) => Some(m),
                     Err(e) => {
+                        // A fetch failure (no network, server down, ...) is
+                        // not the same as the server having no data. Acting
+                        // on stale or fabricated status here risks a wrong
+                        // upload/download, so clear everything instead:
+                        // badges disappear and sync actions refuse to run
+                        // until a fetch actually succeeds again.
                         error!("fetch manifest failed: {}", e);
-                        None
+                        // Only announce the transition into "can't reach the
+                        // server", not every throttled retry while it stays
+                        // down — otherwise this toast never stops popping up.
+                        if data_valid.swap(false, Ordering::Relaxed) {
+                            Toast::show(format!("Couldn't reach server: {}", e));
+                        }
+                        games.write().unwrap().clear();
+                        *fetch_at.write().unwrap() = crate::utils::current_time() as u64;
+                        return;
                     }
                 }
             } else {
@@ -178,6 +201,7 @@ impl SyncEngine {
             *games.write().unwrap() = info_list;
             *cloud_manifest.write().unwrap() = manifest;
             *fetch_at.write().unwrap() = crate::utils::current_time() as u64;
+            data_valid.store(true, Ordering::Relaxed);
         });
     }
 
@@ -393,6 +417,10 @@ impl SyncEngine {
         let config = Config::global();
         if !config.is_configured() {
             Toast::show("Configure server in Settings first.".to_string());
+            return;
+        }
+        if !self.data_valid.load(Ordering::Relaxed) {
+            Toast::show("Sync status unknown, check your connection.".to_string());
             return;
         }
 
