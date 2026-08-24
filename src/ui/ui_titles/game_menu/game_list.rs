@@ -20,7 +20,7 @@ use crate::{
     ime::get_current_format_time,
     tai::{mount_pfs, psv_launch_app_by_title_id, unmount_pfs, Title, Titles},
     ui::{
-        ui_cloud::list_state::ListState, ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast,
+        list_state::ListState, ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast,
     },
     utils::{
         backup_game_save, backup_save_target, get_active_color, get_game_local_backup_dir,
@@ -38,6 +38,7 @@ enum GameMenuAction {
     DeleteSelectedGameSave,
     DeleteAllGameSaves,
     SelectFolders,
+    ToggleSyncExclusion,
 }
 
 impl Deref for GameMenuAction {
@@ -53,6 +54,7 @@ impl Deref for GameMenuAction {
             GameMenuAction::DeleteSelectedGameSave => "Delete Local Backup",
             GameMenuAction::DeleteAllGameSaves => "Delete All Local Backups",
             GameMenuAction::SelectFolders => "Select Folders",
+            GameMenuAction::ToggleSyncExclusion => "Exclude from Sync",
         }
     }
 }
@@ -165,6 +167,7 @@ pub struct GameList {
     game_save_dir_prepare_to_mount: Arc<RwLock<Option<String>>>,
     game_save_dir_on_mounted: Arc<RwLock<Option<String>>>,
     cancel: Arc<AtomicBool>,
+    sync_exclusion_changed: bool,
 }
 
 impl GameList {
@@ -178,6 +181,7 @@ impl GameList {
             game_save_dir_prepare_to_mount: Arc::new(RwLock::new(None)),
             game_save_dir_on_mounted: Arc::new(RwLock::new(None)),
             cancel: Arc::new(AtomicBool::new(false)),
+            sync_exclusion_changed: false,
         };
         list.set_native();
         list
@@ -194,6 +198,7 @@ impl GameList {
             GameMenuAction::DeleteGameSave,
             GameMenuAction::DeleteSelectedGameSave,
             GameMenuAction::DeleteAllGameSaves,
+            GameMenuAction::ToggleSyncExclusion,
         ];
         self.folder_picker = None;
         self.list_state.reset();
@@ -214,6 +219,7 @@ impl GameList {
         if entry.kind == EmulatorKind::Psp && entry.all_paths().len() > 1 {
             actions.push(GameMenuAction::SelectFolders);
         }
+        actions.push(GameMenuAction::ToggleSyncExclusion);
         self.list = actions;
         self.folder_picker = None;
         self.list_state.reset();
@@ -262,6 +268,25 @@ impl GameList {
             Loading::hide();
             pending.store(false, Ordering::Relaxed);
         });
+    }
+
+    /// Exclude-only: excluded entries drop out of the grid, so this menu
+    /// can't be reopened to flip it back. Settings is the way back in.
+    fn toggle_sync_exclusion(&mut self, entry_id: &str, name: &str) {
+        let prompt = format!("\"{}\"\nExclude from sync? Undo in Settings.", name);
+        if UIDialog::present(&prompt) {
+            Config::update(|c| c.set_sync_excluded(entry_id, true));
+            self.sync_exclusion_changed = true;
+        }
+    }
+
+    pub fn sync_exclusion_changed(&self) -> bool {
+        self.sync_exclusion_changed
+    }
+
+    /// True (once) if an exclusion changed since the last check.
+    pub fn take_sync_exclusion_changed(&mut self) -> bool {
+        std::mem::take(&mut self.sync_exclusion_changed)
     }
 
     pub fn delete_selected_game_save(&self, title: &Title) {
@@ -665,10 +690,8 @@ impl GameList {
                     .map(|(name, _)| name.clone())
                     .collect();
                 if let GameListMode::Emulator(entry) = &self.mode {
-                    let mut config = Config::global();
-                    config.set_psp_exclusions(&entry.id, excluded);
-                    config.save();
-                    Config::update_global(config);
+                    let entry_id = entry.id.clone();
+                    Config::update(|c| c.set_psp_exclusions(&entry_id, excluded));
                 }
             } else {
                 if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
@@ -742,6 +765,11 @@ impl GameList {
                                 .collect();
                             self.list_state.reset();
                             self.folder_picker = Some(picker);
+                        }
+                        GameMenuAction::ToggleSyncExclusion => {
+                            let id = entry.id.clone();
+                            let name = entry.name.clone();
+                            self.toggle_sync_exclusion(&id, &name);
                         }
                         _ => {}
                     }
@@ -851,6 +879,9 @@ impl GameList {
                             break;
                         }
                     }
+                }
+                GameMenuAction::ToggleSyncExclusion => {
+                    self.toggle_sync_exclusion(title.title_id(), title.name());
                 }
                 // PSP-only action; never part of the native list.
                 GameMenuAction::SelectFolders => {}

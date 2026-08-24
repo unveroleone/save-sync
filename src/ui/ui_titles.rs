@@ -9,8 +9,10 @@ use log::error;
 
 use crate::{
     app::AppData,
+    config::Config,
     constant::{ABOUT_TEXT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
     emulator::{scan_emulator_entries, EmulatorEntry, EmulatorKind},
+    tai::Title,
     utils::get_active_color,
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_draw_texture_scale,
@@ -41,6 +43,11 @@ pub struct UITitles {
     game_menu: GameMenu,
     emulator_entries: Vec<EmulatorEntry>,
     emulators_loaded: bool,
+    /// Real `app_data.titles` indices not excluded from sync; grid position
+    /// is the index into this Vec, not the real Titles index.
+    visible_native: Vec<i32>,
+    /// Set by `invalidate()`, which has no AppData to refresh with itself.
+    needs_sync_refresh: bool,
 }
 
 impl UITitles {
@@ -54,11 +61,50 @@ impl UITitles {
             game_menu: GameMenu::new(),
             emulator_entries: Vec::new(),
             emulators_loaded: false,
+            visible_native: Vec::new(),
+            needs_sync_refresh: false,
         }
     }
 
-    fn total_size(&self, app_data: &AppData) -> i32 {
-        app_data.titles.size() as i32 + self.emulator_entries.len() as i32
+    fn filter_excluded_emulators(entries: Vec<EmulatorEntry>, config: &Config) -> Vec<EmulatorEntry> {
+        entries
+            .into_iter()
+            .filter(|e| !config.is_effectively_excluded(&e.id, Some(e.kind)))
+            .collect()
+    }
+
+    /// Rebuilds `emulator_entries` and `visible_native` against the current
+    /// exclusion config.
+    fn refresh_sync_filters(&mut self, app_data: &AppData) {
+        let config = Config::global();
+        self.emulator_entries = Self::filter_excluded_emulators(scan_emulator_entries(), &config);
+        self.visible_native = (0..app_data.titles.size() as i32)
+            .filter(|&i| {
+                app_data
+                    .titles
+                    .get_title_by_idx(i)
+                    .map(|t| !config.is_effectively_excluded(t.title_id(), None))
+                    .unwrap_or(false)
+            })
+            .collect();
+        self.icons.clear();
+        self.icon_bufs.write().unwrap().clear();
+        let total = self.total_size(app_data);
+        self.selected_idx = self.selected_idx.min((total - 1).max(0));
+    }
+
+    fn native_count(&self) -> i32 {
+        self.visible_native.len() as i32
+    }
+
+    /// Native title at grid position `visible_idx` (not a real Titles index).
+    fn native_title<'a>(&self, app_data: &'a AppData, visible_idx: i32) -> Option<&'a Title> {
+        let real_idx = *self.visible_native.get(visible_idx as usize)?;
+        app_data.titles.get_title_by_idx(real_idx)
+    }
+
+    fn total_size(&self, _app_data: &AppData) -> i32 {
+        self.native_count() + self.emulator_entries.len() as i32
     }
 
     fn update_selected(&mut self, app_data: &mut AppData, buttons: u32) {
@@ -123,15 +169,18 @@ impl UITitles {
     }
 
     fn update_icons(&mut self, app_data: &mut AppData) {
-        let native_count = app_data.titles.size() as i32;
+        let native_count = self.native_count();
         let total = self.total_size(app_data);
         let start_idx = (self.top_row - 1) * ICON_COL;
         let start_idx = if start_idx < 0 { 0 } else { start_idx };
         let end_idx = start_idx + ICON_COL * (ICON_ROW + 2);
         let end_idx = if end_idx < total { end_idx } else { total };
 
-        // load native title icons
-        for (idx, title) in app_data.titles.iter().enumerate() {
+        // load native title icons (grid position, not the real Titles index)
+        for idx in 0..self.visible_native.len() {
+            let Some(title) = self.native_title(app_data, idx as i32) else {
+                continue;
+            };
             if idx >= start_idx as usize && idx < end_idx as usize {
                 let key = idx as u32;
                 let has_icon = self.icons.contains_key(&key);
@@ -223,7 +272,7 @@ impl UITitles {
     }
 
     fn draw_selected_game_info(&self, app_data: &AppData) {
-        let native_count = app_data.titles.size() as i32;
+        let native_count = self.native_count();
         let total = self.total_size(app_data);
         if total == 0 {
             return;
@@ -233,10 +282,9 @@ impl UITitles {
         let num = format!("→ {}/{}", self.selected_idx + 1, total);
 
         if self.selected_idx < native_count {
-            let titles = &app_data.titles;
-            let title = titles
-                .get_title_by_idx(self.selected_idx)
-                .expect("get title by idx");
+            let Some(title) = self.native_title(app_data, self.selected_idx) else {
+                return;
+            };
             let real_id = title.real_id();
             let header = format!("{}  |  {}", title.title_id(), title.name());
             let mut save_path = format!("{}/{}", GAME_CARD_SAVE_DIR, real_id);
@@ -313,7 +361,7 @@ impl UITitles {
 
     pub fn draw_game_list(&self, app_data: &AppData) {
         let icon_bg = rgba(0x44, 0x44, 0x44, 0xff);
-        let native_count = app_data.titles.size() as i32;
+        let native_count = self.native_count();
         let total = self.total_size(app_data);
         let start_idx = self.top_row * ICON_COL;
         let end_idx = (start_idx + ICON_COL * ICON_ROW).min(total);
@@ -411,13 +459,17 @@ impl UITitles {
 
 impl UIBase for UITitles {
     fn update(&mut self, app_data: &mut AppData, buttons: u32) {
-        // load emulator entries once on first update
         if !self.emulators_loaded {
-            self.emulator_entries = scan_emulator_entries();
+            self.refresh_sync_filters(app_data);
             self.emulators_loaded = true;
         }
 
-        let native_count = app_data.titles.size() as i32;
+        if self.needs_sync_refresh {
+            self.refresh_sync_filters(app_data);
+            self.needs_sync_refresh = false;
+        }
+
+        let native_count = self.native_count();
 
         // update icons texture (native titles only)
         UITitles::update_icons(self, app_data);
@@ -426,12 +478,8 @@ impl UIBase for UITitles {
             self.save_menu.update(buttons);
         } else if self.game_menu.is_forces() {
             if self.selected_idx < native_count {
-                self.game_menu.update(
-                    buttons,
-                    app_data.titles.get_title_by_idx(self.selected_idx),
-                    &app_data.titles,
-                    None,
-                );
+                let title = self.native_title(app_data, self.selected_idx);
+                self.game_menu.update(buttons, title, &app_data.titles, None);
             } else {
                 let emu_idx = (self.selected_idx - native_count) as usize;
                 self.game_menu.update(
@@ -441,17 +489,18 @@ impl UIBase for UITitles {
                     self.emulator_entries.get(emu_idx),
                 );
             }
+            if self.game_menu.take_sync_exclusion_changed() {
+                self.refresh_sync_filters(app_data);
+            }
         } else {
             let total = self.total_size(app_data);
             if total > 0 {
                 if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
                     if self.selected_idx < native_count {
-                        self.save_menu.open(
-                            app_data
-                                .titles
-                                .get_title_by_idx(self.selected_idx)
-                                .expect("selected title"),
-                        );
+                        let title = self.native_title(app_data, self.selected_idx);
+                        if let Some(title) = title {
+                            self.save_menu.open(title);
+                        }
                     } else {
                         let emu_idx = (self.selected_idx - native_count) as usize;
                         if let Some(entry) = self.emulator_entries.get(emu_idx) {
@@ -484,9 +533,7 @@ impl UIBase for UITitles {
                 UIDialog::present_about(ABOUT_TEXT);
             }
             if is_button(buttons, SceCtrlButtons::SceCtrlSelect) {
-                self.emulator_entries = scan_emulator_entries();
-                self.icons.clear();
-                self.icon_bufs.write().unwrap().clear();
+                self.refresh_sync_filters(app_data);
             }
             UITitles::update_selected(self, app_data, buttons);
         }
@@ -510,5 +557,9 @@ impl UIBase for UITitles {
 
     fn is_forces(&self) -> bool {
         self.save_menu.is_forces() || self.game_menu.is_forces()
+    }
+
+    fn invalidate(&mut self) {
+        self.needs_sync_refresh = true;
     }
 }
