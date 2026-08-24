@@ -386,12 +386,16 @@ impl UITitles {
 
     /// Colored badge in a cell's corner, word-wrapped onto up to 2 short
     /// lines so it reads on sight without a legend, even in an 86px cell.
-    fn draw_sync_badge(x: i32, y: i32, cell_size: i32, status: &SyncStatus) {
-        let lines: &[&str] = match status {
-            SyncStatus::InSync => &["Synced"],
-            SyncStatus::UploadNeeded | SyncStatus::LocalOnly => &["Upload", "Needed"],
-            SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => &["Download", "Needed"],
-            SyncStatus::Conflict => &["Conflict"],
+    fn draw_sync_badge(x: i32, y: i32, cell_size: i32, status: &SyncStatus, checking: bool) {
+        let lines: &[&str] = if checking {
+            &["Checking"]
+        } else {
+            match status {
+                SyncStatus::InSync => &["Synced"],
+                SyncStatus::UploadNeeded | SyncStatus::LocalOnly => &["Upload", "Needed"],
+                SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => &["Download", "Needed"],
+                SyncStatus::Conflict => &["Conflict"],
+            }
         };
         let scale = 0.9;
         let metrics: Vec<(i32, i32)> = lines
@@ -402,14 +406,15 @@ impl UITitles {
         let bh: i32 = metrics.iter().map(|(_, h)| h + 2).sum::<i32>() + 2;
         let bx = x + cell_size - bw;
         let by = y;
-        // Translucent so the icon underneath still shows through.
-        vita2d_draw_rect(
-            bx as f32,
-            by as f32,
-            bw as f32,
-            bh as f32,
-            SyncEngine::status_color_alpha(status, 0xd0),
-        );
+        // Translucent so the icon underneath still shows through. Neutral
+        // gray while checking so it never flashes a status color that's
+        // about to be overwritten.
+        let badge_color = if checking {
+            rgba(0x77, 0x77, 0x77, 0xd0)
+        } else {
+            SyncEngine::status_color_alpha(status, 0xd0)
+        };
+        vita2d_draw_rect(bx as f32, by as f32, bw as f32, bh as f32, badge_color);
         let mut cursor_y = by + 1;
         for (line, (w, h)) in lines.iter().zip(metrics.iter()) {
             cursor_y += h;
@@ -425,9 +430,9 @@ impl UITitles {
         let start_idx = self.top_row * ICON_COL;
         let end_idx = (start_idx + ICON_COL * ICON_ROW).min(total);
         let sync_games = self.sync_engine.games.read().unwrap();
-        let status_by_id: HashMap<&str, &SyncStatus> = sync_games
+        let status_by_id: HashMap<&str, (&SyncStatus, bool)> = sync_games
             .iter()
-            .map(|g| (g.title_id.as_str(), &g.status))
+            .map(|g| (g.title_id.as_str(), (&g.status, g.checking)))
             .collect();
 
         for idx in 0..(ICON_COL * ICON_ROW) as i32 {
@@ -454,8 +459,8 @@ impl UITitles {
                     );
                 }
                 if let Some(title) = self.native_title(app_data, icon_idx as i32) {
-                    if let Some(status) = status_by_id.get(title.title_id()) {
-                        Self::draw_sync_badge(x, y, cell_size, status);
+                    if let Some((status, checking)) = status_by_id.get(title.title_id()) {
+                        Self::draw_sync_badge(x, y, cell_size, status, *checking);
                     }
                 }
             } else {
@@ -510,8 +515,8 @@ impl UITitles {
                             label,
                         );
                     }
-                    if let Some(status) = status_by_id.get(entry.id.as_str()) {
-                        Self::draw_sync_badge(x, y, cell_size, status);
+                    if let Some((status, checking)) = status_by_id.get(entry.id.as_str()) {
+                        Self::draw_sync_badge(x, y, cell_size, status, *checking);
                     }
                 }
             }

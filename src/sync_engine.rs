@@ -12,17 +12,25 @@ use crate::{
     api::{Api, CloudManifest},
     config::Config,
     constant::{CANCEL_HINT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
-    emulator::{emulator_kind_from_entry_id, scan_emulator_entries},
+    emulator::{emulator_kind_from_entry_id, scan_emulator_entries, EmulatorEntry},
     sync::{status_for, LocalManifest, SyncStatus},
     tai::{PfsMountHandshake, Titles},
     ui::{ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast},
     utils::{
-        backup_game_save, backup_save_target, get_game_local_backup_dir,
+        backup_game_save, backup_save_target, content_hash_sources, get_game_local_backup_dir,
         read_content_hash_sidecar, restore_save_target, save_target_for_downloaded_archive,
         sha256_file, SaveTarget,
     },
     vita2d::rgba,
 };
+
+/// Shared wording for every call site that refuses to act because sync
+/// status isn't confirmed yet — the situation is the same (nothing
+/// trustworthy to act on right now), but the reason differs, so callers
+/// pass it in rather than getting a one-size-fits-all message.
+fn status_not_ready(reason: &str) -> String {
+    format!("Sync status not ready ({}), try again in a moment.", reason)
+}
 
 #[derive(Clone)]
 pub struct SyncGameInfo {
@@ -42,6 +50,21 @@ pub struct SyncGameInfo {
     pub cloud_size: Option<u64>,
     pub version_count: u64,
     pub has_local_backup: bool,
+    /// `status` is still the provisional (last-backup based) guess — the
+    /// live check (a directory hash for emulator entries, a PFS mount for
+    /// native titles) hasn't reached this entry yet. Acting on `status`
+    /// while this is true risks syncing against stale data, so actions
+    /// must refuse until it clears. Always false for pure-cloud entries,
+    /// which have no local data to verify.
+    pub checking: bool,
+}
+
+/// A local entry still queued for live-status verification in `fetch()`.
+/// Emulator entries just need a directory hash; native titles need a PFS
+/// mount first, so they're processed after all emulator entries.
+enum CheckTarget {
+    Emulator(EmulatorEntry),
+    Native { title_id: String, real_id: String },
 }
 
 pub struct SyncEngine {
@@ -108,6 +131,9 @@ impl SyncEngine {
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
         let fetch_at = Arc::clone(&self.fetch_at);
         let data_valid = Arc::clone(&self.data_valid);
+        let pending = Arc::clone(&self.pending);
+        let cancel = Arc::clone(&self.cancel);
+        let pfs_mount = self.pfs_mount.clone();
 
         tokio::spawn(async move {
             let manifest = if is_configured {
@@ -136,8 +162,15 @@ impl SyncEngine {
                 None
             };
 
-            // Build per-game info, dropping sync-excluded entries.
+            // Fast skeleton pass: every entry's status starts from cached,
+            // mount-free data (the last local backup's hash) so the grid
+            // paints immediately. Anything with live save data to verify is
+            // marked `checking` and queued below — emulator entries first
+            // (a plain directory hash, no mount) and native titles after
+            // (behind a PFS mount), so a long queue of native titles never
+            // holds up the much faster emulator ones.
             let mut info_list = Vec::new();
+            let mut native_checks: Vec<CheckTarget> = Vec::new();
             for (title_id, real_id, name) in &title_list {
                 if config.is_effectively_excluded(title_id, None) {
                     continue;
@@ -150,13 +183,19 @@ impl SyncEngine {
                     name,
                     &local_dir,
                     &manifest,
+                    None,
+                    true,
                 );
+                native_checks.push(CheckTarget::Native {
+                    title_id: title_id.clone(),
+                    real_id: real_id.clone(),
+                });
                 info_list.push(info);
             }
 
-            // Emulator entries
             let mut seen_ids: std::collections::HashSet<String> =
                 title_list.iter().map(|(id, _, _)| id.clone()).collect();
+            let mut checks: Vec<CheckTarget> = Vec::new();
             for entry in &emu_entries {
                 seen_ids.insert(entry.id.clone()); // even if excluded below
                 if config.is_effectively_excluded(&entry.id, Some(entry.kind)) {
@@ -170,11 +209,16 @@ impl SyncEngine {
                     &entry.server_title,
                     &local_dir,
                     &manifest,
+                    None,
+                    true,
                 );
+                checks.push(CheckTarget::Emulator(entry.clone()));
                 info_list.push(info);
             }
+            checks.append(&mut native_checks);
 
             // Add pure-cloud entries (server has them, but no local folder).
+            // Nothing local to verify, so these never enter `checks`.
             if let Some(ref m) = manifest {
                 for (id, entry) in &m.games {
                     let kind = emulator_kind_from_entry_id(id);
@@ -185,8 +229,16 @@ impl SyncEngine {
                             .filter(|t| !t.is_empty())
                             .unwrap_or_else(|| id.clone());
                         let local_dir = get_game_local_backup_dir(id, id);
-                        let info =
-                            Self::build_sync_info(id, None, &display_name, "", &local_dir, &manifest);
+                        let info = Self::build_sync_info(
+                            id,
+                            None,
+                            &display_name,
+                            "",
+                            &local_dir,
+                            &manifest,
+                            None,
+                            false,
+                        );
                         info_list.push(info);
                     }
                 }
@@ -199,9 +251,72 @@ impl SyncEngine {
             });
 
             *games.write().unwrap() = info_list;
-            *cloud_manifest.write().unwrap() = manifest;
+            *cloud_manifest.write().unwrap() = manifest.clone();
             *fetch_at.write().unwrap() = crate::utils::current_time() as u64;
             data_valid.store(true, Ordering::Relaxed);
+
+            // Verify each queued entry's live status, one at a time. Bails
+            // quietly, leaving the rest at their provisional status until
+            // the next fetch, if a real sync action starts in the meantime
+            // rather than fight it for the mount.
+            if checks.is_empty() || pending.load(Ordering::Relaxed) {
+                return;
+            }
+            pfs_mount.clear();
+            for target in checks {
+                if pending.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let (title_id, live_hash) = match target {
+                    CheckTarget::Emulator(entry) => {
+                        let exclusions = config.psp_exclusions_for(&entry.id);
+                        let live_target = entry.save_target_excluding(&exclusions);
+                        (entry.id.clone(), content_hash_sources(&live_target.sources))
+                    }
+                    CheckTarget::Native { title_id, real_id } => {
+                        let Some(game_save_dir) = Self::native_save_dir(&real_id) else {
+                            // No live save at all: nothing to verify, the
+                            // provisional (backup-based) status already
+                            // final. Still clear `checking` or the badge
+                            // would show "Checking" forever.
+                            if let Ok(mut games) = games.write() {
+                                if let Some(g) =
+                                    games.iter_mut().find(|g| g.title_id == title_id)
+                                {
+                                    g.checking = false;
+                                }
+                            }
+                            continue;
+                        };
+                        if !pfs_mount.wait_for_mount(&cancel, &game_save_dir) {
+                            break;
+                        }
+                        (
+                            title_id,
+                            content_hash_sources(&SaveTarget::single(&game_save_dir).sources),
+                        )
+                    }
+                };
+                let cloud_data = manifest.as_ref().and_then(|m| m.games.get(&title_id));
+                let last_synced_hash = LocalManifest::load()
+                    .games
+                    .get(&title_id)
+                    .and_then(|e| e.last_synced_hash.clone());
+                let status = status_for(
+                    true,
+                    cloud_data.is_some(),
+                    live_hash.as_deref(),
+                    cloud_data.and_then(|ce| ce.content_hash.as_deref()),
+                    last_synced_hash.as_deref(),
+                );
+                if let Ok(mut games) = games.write() {
+                    if let Some(g) = games.iter_mut().find(|g| g.title_id == title_id) {
+                        g.status = status;
+                        g.has_local_backup = true;
+                        g.checking = false;
+                    }
+                }
+            }
         });
     }
 
@@ -212,8 +327,14 @@ impl SyncEngine {
         server_title: &str,
         local_dir: &str,
         manifest: &Option<CloudManifest>,
+        live_hash: Option<String>,
+        checking: bool,
     ) -> SyncGameInfo {
-        let (has_local, local_time, local_content) = Self::scan_local_backup(local_dir);
+        let (backup_exists, local_time, backup_content) = Self::scan_local_backup(local_dir);
+        let (has_local, local_content) = match live_hash {
+            Some(h) => (true, Some(h)),
+            None => (backup_exists, backup_content),
+        };
         let cloud_data = manifest.as_ref().and_then(|m| m.games.get(title_id));
 
         let last_synced_hash = LocalManifest::load()
@@ -240,6 +361,7 @@ impl SyncEngine {
             cloud_size: cloud_data.map(|c| c.size),
             version_count: cloud_data.map(|c| c.version_count).unwrap_or(0),
             has_local_backup: has_local,
+            checking,
         }
     }
 
@@ -397,6 +519,10 @@ impl SyncEngine {
     }
 
     pub fn per_game_action(&self, game: &SyncGameInfo) {
+        if game.checking {
+            Toast::show(status_not_ready("still checking this save"));
+            return;
+        }
         match game.status {
             SyncStatus::UploadNeeded | SyncStatus::LocalOnly => {
                 self.upload_single(game);
@@ -427,11 +553,15 @@ impl SyncEngine {
             return;
         }
         if !self.data_valid.load(Ordering::Relaxed) {
-            Toast::show("Sync status unknown, check your connection.".to_string());
+            Toast::show(status_not_ready("check your connection"));
             return;
         }
 
         let games = self.games.read().unwrap().clone();
+        if games.iter().any(|g| g.checking) {
+            Toast::show(status_not_ready("still checking saves"));
+            return;
+        }
         // LocalOnly counts as pending upload: status is derived from
         // local-backup existence, so it never reports UploadNeeded and
         // filtering on that alone left this phase unreachable.
@@ -620,17 +750,14 @@ impl SyncEngine {
         });
     }
 
-    /// Newest local zip for `game`, creating one first if none exists yet.
-    /// Mirrors the old game-menu "Backup All to Server", which never skipped
-    /// a title just because it had never been backed up before.
+    /// Always makes a fresh local backup from the live save data and
+    /// returns its path — never reuses an older zip, which could predate
+    /// the change that made this upload necessary in the first place.
     fn ensure_backup(
         game: &SyncGameInfo,
         pfs_mount: &PfsMountHandshake,
         cancel: &Arc<AtomicBool>,
     ) -> Result<String, String> {
-        if let Some(path) = Self::find_newest_zip(&game.local_dir) {
-            return Ok(path);
-        }
         let backup_to_path = format!(
             "{}/{}.zip",
             game.local_dir,
@@ -695,29 +822,6 @@ impl SyncEngine {
         Ok(false)
     }
 
-    fn find_newest_zip(dir: &str) -> Option<String> {
-        let path = Path::new(dir);
-        if !path.exists() {
-            return None;
-        }
-        let mut newest: Option<(String, std::time::SystemTime)> = None;
-        if let Ok(entries) = path.read_dir() {
-            for entry in entries.flatten() {
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if fname.ends_with(".zip") && !fname.ends_with(" auto.zip") {
-                    if let Ok(meta) = entry.metadata() {
-                        if let Ok(mtime) = meta.modified() {
-                            if newest.as_ref().map(|(_, t)| mtime > *t).unwrap_or(true) {
-                                newest = Some((entry.path().to_string_lossy().to_string(), mtime));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        newest.map(|(p, _)| p)
-    }
-
     fn status_rgb(status: &SyncStatus) -> (i32, i32, i32) {
         match status {
             SyncStatus::InSync => (0x44, 0xcc, 0x44),
@@ -727,32 +831,11 @@ impl SyncEngine {
         }
     }
 
-    pub fn status_color(status: &SyncStatus) -> u32 {
-        let (r, g, b) = Self::status_rgb(status);
-        rgba(r, g, b, 0xff)
-    }
-
     /// Same palette, custom alpha — for overlays drawn on top of other
     /// content (e.g. a badge sitting over a game icon).
     pub fn status_color_alpha(status: &SyncStatus, a: i32) -> u32 {
         let (r, g, b) = Self::status_rgb(status);
         rgba(r, g, b, a)
-    }
-
-    pub fn status_label(status: &SyncStatus, version_count: u64) -> String {
-        let base = match status {
-            SyncStatus::InSync => "Synced",
-            SyncStatus::UploadNeeded => "Upload",
-            SyncStatus::DownloadAvailable => "Download",
-            SyncStatus::Conflict => "Conflict",
-            SyncStatus::LocalOnly => "Not Uploaded",
-            SyncStatus::CloudOnly => "Cloud Only",
-        };
-        if version_count > 0 {
-            format!("{} ({})", base, version_count)
-        } else {
-            base.to_string()
-        }
     }
 }
 
