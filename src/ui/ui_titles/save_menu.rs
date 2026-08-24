@@ -6,9 +6,9 @@ use std::{
 use crate::{
     config::Config,
     constant::{
-        GAME_CARD_SAVE_DIR, GAME_SAVE_DIR, NEW_BACKUP, NEW_CLOUD_BACKUP,
-        SAVE_DRAWER_BOTTOM_BAR_TEXT, SAVE_DRAWER_CLOUD_BOTTOM_BAR_TEXT, SCREEN_WIDTH, TAB_CLOUD,
-        TAB_LOCAL, TEXT_L, TEXT_R,
+        FOLDER_PICKER_BOTTOM_BAR_TEXT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR, NEW_BACKUP,
+        SAVE_DRAWER_BOTTOM_BAR_TEXT, SAVE_DRAWER_MANAGE_BOTTOM_BAR_TEXT, SCREEN_WIDTH, TAB_LOCAL,
+        TAB_MANAGE, TEXT_L, TEXT_R,
     },
     tai::Title,
     ui::{ui_drawer::UIDrawer, ui_list::UIList},
@@ -19,14 +19,17 @@ use crate::{
     },
 };
 
-use self::save_list::{save_list_cloud::SaveListCloud, save_list_local::SaveListLocal};
+use self::save_list::{
+    save_list_local::SaveListLocal,
+    save_list_manage::{ManageContext, SaveListManage},
+};
 
 pub mod save_list;
 
 pub struct SaveMenu {
     is_list_local: bool,
     local: Option<Box<dyn UIList>>,
-    cloud: Option<Box<dyn UIList>>,
+    manage: Option<Box<dyn UIList>>,
     drawer: Option<UIDrawer>,
     save_target: Option<SaveTarget>,
 }
@@ -36,7 +39,7 @@ impl SaveMenu {
         SaveMenu {
             is_list_local: true,
             local: None,
-            cloud: None,
+            manage: None,
             drawer: None,
             save_target: None,
         }
@@ -49,6 +52,7 @@ impl SaveMenu {
         server_title: &str,
         save_target: Option<SaveTarget>,
         needs_pfs: bool,
+        manage_context: ManageContext,
     ) {
         self.save_target = save_target;
         let config = Arc::new(RwLock::new(Config::global()));
@@ -58,15 +62,14 @@ impl SaveMenu {
             name,
             server_title,
             needs_pfs,
-            Arc::clone(&config),
+            config,
         )));
-        self.cloud = Some(Box::new(SaveListCloud::new(
-            NEW_CLOUD_BACKUP,
+        self.manage = Some(Box::new(SaveListManage::new(
             title_id,
             name,
             server_title,
             needs_pfs,
-            config,
+            manage_context,
         )));
         self.init_save_list();
         if self.drawer.is_none() {
@@ -84,8 +87,8 @@ impl SaveMenu {
         if !self.local.is_none() {
             self.local = None;
         }
-        if !self.cloud.is_none() {
-            self.cloud = None;
+        if !self.manage.is_none() {
+            self.manage = None;
         }
     }
 
@@ -114,7 +117,16 @@ impl SaveMenu {
                 break;
             }
         }
-        self.open_for(title.title_id(), title.name(), title.name(), save_target, true);
+        self.open_for(
+            title.title_id(),
+            title.name(),
+            title.name(),
+            save_target,
+            true,
+            ManageContext::Native {
+                real_id: title.real_id().to_string(),
+            },
+        );
     }
 
     pub fn close(&mut self) {
@@ -125,7 +137,7 @@ impl SaveMenu {
 
     pub fn is_pending(&self) -> bool {
         // check SaveList is pending
-        [&self.local, &self.cloud]
+        [&self.local, &self.manage]
             .iter()
             .find(|item| {
                 if let Some(save_list) = item {
@@ -140,7 +152,7 @@ impl SaveMenu {
         if self.is_list_local {
             &mut self.local
         } else {
-            &mut self.cloud
+            &mut self.manage
         }
     }
 
@@ -150,10 +162,34 @@ impl SaveMenu {
         }
     }
 
+    /// True (once) if an exclusion changed since the last check.
+    pub fn take_sync_exclusion_changed(&mut self) -> bool {
+        self.manage
+            .as_mut()
+            .map(|list| list.take_sync_exclusion_changed())
+            .unwrap_or(false)
+    }
+
     pub fn update(&mut self, buttons: u32) {
         if self.is_pending() {
             return;
         }
+
+        // While a sub-view (e.g. the PSP folder picker) owns input, circle
+        // means "save it", not "close the whole drawer".
+        let picker_active = self
+            .get_save_list()
+            .as_ref()
+            .map(|list| list.picker_active())
+            .unwrap_or(false);
+        if picker_active {
+            let save_target = self.save_target.clone();
+            if let Some(save_list) = self.get_save_list() {
+                save_list.update(&save_target, buttons);
+            }
+            return;
+        }
+
         if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
             self.close();
         } else if (is_button(buttons, SceCtrlButtons::SceCtrlLtrigger)
@@ -169,12 +205,11 @@ impl SaveMenu {
                 self.is_list_local = is_to_local;
                 self.init_save_list();
             }
-        } else if let Some(save_list) = if self.is_list_local {
-            &mut self.local
         } else {
-            &mut self.cloud
-        } {
-            save_list.update(&self.save_target, buttons);
+            let save_target = self.save_target.clone();
+            if let Some(save_list) = self.get_save_list() {
+                save_list.update(&save_target, buttons);
+            }
         }
     }
 
@@ -199,14 +234,14 @@ impl SaveMenu {
             1.0,
             TAB_LOCAL,
         );
-        // cloud
+        // manage
         vita2d_draw_text(
             left + (SCREEN_WIDTH / 4)
-                + ((SCREEN_WIDTH / 4 - 12) - vita2d_text_width(1.0, TAB_CLOUD)) / 2,
+                + ((SCREEN_WIDTH / 4 - 12) - vita2d_text_width(1.0, TAB_MANAGE)) / 2,
             5 + 22,
             rgba(0xff, 0xff, 0xff, 0xff),
             1.0,
-            TAB_CLOUD,
+            TAB_MANAGE,
         );
         // l
         vita2d_draw_text(
@@ -240,22 +275,28 @@ impl SaveMenu {
         if let Some(drawer) = &self.drawer {
             let left = drawer.get_progress_left() as i32;
             if self.is_list_local {
-                // drawer
                 drawer.draw(SAVE_DRAWER_BOTTOM_BAR_TEXT);
-                // tabs
                 self.draw_tabs(left);
-                // list
                 if let Some(local) = &self.local {
                     local.draw(left, 10);
                 }
             } else {
-                // drawer
-                drawer.draw(SAVE_DRAWER_CLOUD_BOTTOM_BAR_TEXT);
-                // tabs
-                self.draw_tabs(left);
-                // list
-                if let Some(cloud) = &self.cloud {
-                    cloud.draw(left, 10);
+                let picker_active = self
+                    .manage
+                    .as_ref()
+                    .map(|list| list.picker_active())
+                    .unwrap_or(false);
+                let bar_text = if picker_active {
+                    FOLDER_PICKER_BOTTOM_BAR_TEXT
+                } else {
+                    SAVE_DRAWER_MANAGE_BOTTOM_BAR_TEXT
+                };
+                drawer.draw(bar_text);
+                if !picker_active {
+                    self.draw_tabs(left);
+                }
+                if let Some(manage) = &self.manage {
+                    manage.draw(left, 10);
                 }
             }
         }

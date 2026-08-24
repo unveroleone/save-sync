@@ -10,7 +10,7 @@ use log::error;
 use crate::{
     app::AppData,
     config::Config,
-    constant::{GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
+    constant::{ABOUT_TEXT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
     emulator::{scan_emulator_entries, EmulatorEntry, EmulatorKind},
     sync::SyncStatus,
     sync_engine::{SyncEngine, SyncGameInfo},
@@ -23,11 +23,10 @@ use crate::{
     },
 };
 
-use self::{game_menu::GameMenu, save_menu::SaveMenu};
+use self::save_menu::{save_list::save_list_manage::ManageContext, SaveMenu};
 
-use super::{ui_base::UIBase, ui_loading::Loading, ui_toast::Toast};
+use super::{ui_base::UIBase, ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast};
 
-pub mod game_menu;
 pub mod save_menu;
 
 const ICON_SIZE: i32 = 94;
@@ -42,7 +41,6 @@ pub struct UITitles {
     pub icons: HashMap<u32, Vita2dTexture>,
     pub icon_bufs: Arc<RwLock<HashMap<u32, Option<Vec<u8>>>>>,
     save_menu: SaveMenu,
-    game_menu: GameMenu,
     emulator_entries: Vec<EmulatorEntry>,
     emulators_loaded: bool,
     /// Real `app_data.titles` indices not excluded from sync; grid position
@@ -61,7 +59,6 @@ impl UITitles {
             icons: HashMap::new(),
             icon_bufs: Arc::new(RwLock::new(HashMap::new())),
             save_menu: SaveMenu::new(),
-            game_menu: GameMenu::new(),
             emulator_entries: Vec::new(),
             emulators_loaded: false,
             visible_native: Vec::new(),
@@ -529,10 +526,6 @@ impl UITitles {
         if self.save_menu.is_active() {
             self.save_menu.draw();
         }
-
-        if self.game_menu.is_active() {
-            self.game_menu.draw();
-        }
     }
 }
 
@@ -557,20 +550,7 @@ impl UIBase for UITitles {
 
         if self.save_menu.is_forces() {
             self.save_menu.update(buttons);
-        } else if self.game_menu.is_forces() {
-            if self.selected_idx < native_count {
-                let title = self.native_title(app_data, self.selected_idx);
-                self.game_menu.update(buttons, title, &app_data.titles, None);
-            } else {
-                let emu_idx = (self.selected_idx - native_count) as usize;
-                self.game_menu.update(
-                    buttons,
-                    None,
-                    &app_data.titles,
-                    self.emulator_entries.get(emu_idx),
-                );
-            }
-            if self.game_menu.take_sync_exclusion_changed() {
+            if self.save_menu.take_sync_exclusion_changed() {
                 self.refresh_sync_filters(app_data);
             }
         } else if self.sync_engine.pending.load(Ordering::Relaxed) {
@@ -608,26 +588,20 @@ impl UIBase for UITitles {
                                 &server_title,
                                 Some(entry.save_target_excluding(&exclusions)),
                                 false,
+                                ManageContext::Emulator(entry.clone()),
                             );
                         }
                     }
                 } else if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {
-                    if self.selected_idx < native_count {
-                        self.game_menu.open();
+                    if let Some(game) = self.current_sync_game(app_data) {
+                        self.sync_engine.per_game_action(&game);
                     } else {
-                        let emu_idx = (self.selected_idx - native_count) as usize;
-                        if let Some(entry) = self.emulator_entries.get(emu_idx) {
-                            self.game_menu.open_emulator(entry);
-                        }
+                        Toast::show("Sync status not loaded yet.".to_string());
                     }
                 }
             }
             if is_button(buttons, SceCtrlButtons::SceCtrlSquare) {
-                if let Some(game) = self.current_sync_game(app_data) {
-                    self.sync_engine.per_game_action(&game);
-                } else {
-                    Toast::show("Sync status not loaded yet.".to_string());
-                }
+                UIDialog::present(ABOUT_TEXT);
             }
             if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
                 self.sync_engine.sync_all();
@@ -649,9 +623,6 @@ impl UIBase for UITitles {
         if !self.save_menu.is_active() {
             self.save_menu.free_list();
         }
-        if !self.game_menu.is_active() {
-            self.game_menu.free();
-        }
     }
 
     fn draw(&self, app_data: &AppData) {
@@ -664,9 +635,7 @@ impl UIBase for UITitles {
     }
 
     fn is_forces(&self) -> bool {
-        self.save_menu.is_forces()
-            || self.game_menu.is_forces()
-            || self.sync_engine.pending.load(Ordering::Relaxed)
+        self.save_menu.is_forces() || self.sync_engine.pending.load(Ordering::Relaxed)
     }
 
     fn invalidate(&mut self) {

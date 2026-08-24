@@ -14,4 +14,18 @@ pub trait UIList {
     fn update(&mut self, save_target: &Option<SaveTarget>, buttons: u32);
 
     fn draw(&self, left: i32, top: i32);
+
+    /// True while a nested sub-view (e.g. a folder picker) owns input, so the
+    /// drawer's own circle-to-close must be deferred to it.
+    fn picker_active(&self) -> bool {
+        false
+    }
+
+    fn sync_exclusion_changed(&self) -> bool {
+        false
+    }
+
+    fn take_sync_exclusion_changed(&mut self) -> bool {
+        false
+    }
 }

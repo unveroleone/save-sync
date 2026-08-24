@@ -50,25 +50,21 @@ pub const TEXT_R: &str = "-> R";
 
 // desktop bottom bar
 pub const DESKTOP_BOTTOM_BAR_TEXT: &str =
-    "(START) Exit    (△) Menu    (X) Saves    (□) Sync    (〇) Sync All    (SEL) Refresh";
+    "(START) Exit    (X) Manage    (△) Sync    (□) About    (〇) Sync All    (SEL) Refresh";
 pub const DESKTOP_BOTTOM_BAR_SETTINGS_TEXT: &str = "(X) Edit    (〇) Back";
 
 // save drawer (local tab)
 pub const SAVE_DRAWER_BOTTOM_BAR_TEXT: &str =
     "(SEL)Up  (□)Restore  (△)Del  (〇)Close  (X)Sel";
-// save drawer (cloud/server tab)
-pub const SAVE_DRAWER_CLOUD_BOTTOM_BAR_TEXT: &str =
-    "(□) Restore  (△) Delete  (〇) Close  (X) Select";
-pub const ACTION_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
-pub const TITLE_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
-// PSP folder picker (game menu)
+// save drawer (manage tab)
+pub const SAVE_DRAWER_MANAGE_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
+// PSP folder picker (manage tab)
 pub const FOLDER_PICKER_BOTTOM_BAR_TEXT: &str = "(X) Toggle    (〇) Save";
 
 // save menu tabs
 pub const TAB_LOCAL: &str = "Local Backup";
-pub const TAB_CLOUD: &str = "Server Backup";
+pub const TAB_MANAGE: &str = "Manage";
 pub const NEW_BACKUP: &str = "New Backup";
-pub const NEW_CLOUD_BACKUP: &str = "Upload to Server";
 
 // blacklist: files never included in a save backup zip
 pub const BACKUP_BLACK_LIST: [&str; 4] = [
@@ -98,3 +94,6 @@ pub const DIALOG_CANCEL_TEXT: &str = "(〇) Cancel";
 
 // shown in the loading dialog while a bulk run is interruptible
 pub const CANCEL_HINT: &str = "(〇) Stop";
+
+// about dialog text
+pub const ABOUT_TEXT: &str = "Save Sync — Two-Vita save sync tool by unveroleone";
