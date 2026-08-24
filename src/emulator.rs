@@ -8,10 +8,21 @@ use crate::{
     utils::{get_game_local_backup_dir, SaveTarget},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmulatorKind {
     Psp,
     RetroArch,
+}
+
+/// Inverse of the id prefix scan_emulator_entries() constructs below.
+pub fn emulator_kind_from_entry_id(id: &str) -> Option<EmulatorKind> {
+    if id.starts_with("PSP_") {
+        Some(EmulatorKind::Psp)
+    } else if id.starts_with("RETROARCH_") {
+        Some(EmulatorKind::RetroArch)
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Clone)]
