@@ -63,6 +63,32 @@ impl LocalManifest {
     }
 }
 
+/// Sync status from raw backup presence + content hashes. Bridges the
+/// exists-only case (backups from before content hashes existed) to
+/// compute_status's hash-based comparison.
+pub fn status_for(
+    has_local: bool,
+    has_cloud: bool,
+    local_hash: Option<&str>,
+    cloud_hash: Option<&str>,
+    last_synced_hash: Option<&str>,
+) -> SyncStatus {
+    match (has_local, has_cloud) {
+        (false, false) => SyncStatus::LocalOnly,
+        (false, true) => SyncStatus::CloudOnly,
+        (true, false) => SyncStatus::LocalOnly,
+        (true, true) => match (local_hash, cloud_hash) {
+            (Some(local), Some(cloud)) => compute_status(&GameSyncEntry {
+                local_hash: Some(local.to_string()),
+                cloud_hash: Some(cloud.to_string()),
+                last_synced_hash: last_synced_hash.map(str::to_string),
+                ..Default::default()
+            }),
+            _ => SyncStatus::InSync,
+        },
+    }
+}
+
 pub fn compute_status(entry: &GameSyncEntry) -> SyncStatus {
     match (
         &entry.local_hash,

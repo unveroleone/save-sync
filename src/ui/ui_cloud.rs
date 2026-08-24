@@ -178,36 +178,17 @@ impl UICloud {
             .as_ref()
             .and_then(|m| m.games.get(title_id));
 
-        // Status from the canonical content hashes when both sides have one;
-        // otherwise the exists-based fallback from before hashes existed.
-        let sync_entry = crate::sync::LocalManifest::load()
+        let last_synced_hash = crate::sync::LocalManifest::load()
             .games
             .get(title_id)
-            .cloned();
-        let status = match (&has_local, cloud_data) {
-            (false, None) => SyncStatus::LocalOnly,
-            (false, Some(_)) => SyncStatus::CloudOnly,
-            (true, None) => SyncStatus::LocalOnly,
-            (true, Some(ce)) => match (&local_content, &ce.content_hash) {
-                (Some(local), Some(cloud)) => {
-                    if local == cloud {
-                        SyncStatus::InSync
-                    } else {
-                        let last = sync_entry.and_then(|e| e.last_synced_hash);
-                        match last {
-                            // Server unchanged, local differs: push.
-                            Some(last) if last == *cloud => SyncStatus::UploadNeeded,
-                            // Local unchanged, server differs: pull.
-                            Some(last) if last == *local => SyncStatus::DownloadAvailable,
-                            // Both moved (or unknown): let the user decide.
-                            _ => SyncStatus::Conflict,
-                        }
-                    }
-                }
-                // Older backups carry no content hash: trust existence.
-                _ => SyncStatus::InSync,
-            },
-        };
+            .and_then(|e| e.last_synced_hash.clone());
+        let status = crate::sync::status_for(
+            has_local,
+            cloud_data.is_some(),
+            local_content.as_deref(),
+            cloud_data.and_then(|ce| ce.content_hash.as_deref()),
+            last_synced_hash.as_deref(),
+        );
 
         SyncGameInfo {
             title_id: title_id.to_string(),
