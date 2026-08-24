@@ -276,32 +276,24 @@ impl SyncEngine {
         (has, ts, content)
     }
 
-    /// Upload a single game: find newest local zip, SHA256, POST to server.
+    /// Upload a single game: create a local backup first if it doesn't have
+    /// one yet (same as Sync All), then SHA256 and POST it to the server.
     pub fn upload_single(&self, game: &SyncGameInfo) {
         let config = Config::global();
         if !config.is_configured() {
             Toast::show("Configure server in Settings first.".to_string());
             return;
         }
-        let zip_path = match Self::find_newest_zip(&game.local_dir) {
-            Some(p) => p,
-            None => {
-                Toast::show("No local backup to upload.".to_string());
-                return;
-            }
-        };
-        let hash = match sha256_file(&zip_path) {
-            Ok(h) => h,
-            Err(_) => {
-                Toast::show("Failed to hash local backup.".to_string());
-                return;
-            }
-        };
+
+        self.pfs_mount.clear();
+        self.cancel.store(false, Ordering::Relaxed);
+        let pfs_mount = self.pfs_mount.clone();
+        let cancel = Arc::clone(&self.cancel);
         let ts = crate::ime::get_current_format_time().to_string();
         let tid = game.title_id.to_string();
         let n = game.name.to_string();
         let server_title = game.server_title.to_string();
-        let content_hash = read_content_hash_sidecar(&zip_path).unwrap_or_default();
+        let game = game.clone();
         let pending = Arc::clone(&self.pending);
         let games = Arc::clone(&self.games);
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
@@ -310,6 +302,25 @@ impl SyncEngine {
         Loading::show();
         tokio::spawn(async move {
             let config = Config::global();
+            let zip_path = match Self::ensure_backup(&game, &pfs_mount, &cancel) {
+                Ok(path) => path,
+                Err(err) => {
+                    Toast::show(format!("Backup failed: {}", err));
+                    Loading::hide();
+                    pending.store(false, Ordering::Relaxed);
+                    return;
+                }
+            };
+            let hash = match sha256_file(&zip_path) {
+                Ok(h) => h,
+                Err(_) => {
+                    Toast::show("Failed to hash local backup.".to_string());
+                    Loading::hide();
+                    pending.store(false, Ordering::Relaxed);
+                    return;
+                }
+            };
+            let content_hash = read_content_hash_sidecar(&zip_path).unwrap_or_default();
             match Api::upload_save(&config, &tid, &server_title, &content_hash, &zip_path, &hash, &ts) {
                 Ok(_) => {
                     LocalManifest::record(&tid, &content_hash);
@@ -388,11 +399,7 @@ impl SyncEngine {
     pub fn per_game_action(&self, game: &SyncGameInfo) {
         match game.status {
             SyncStatus::UploadNeeded | SyncStatus::LocalOnly => {
-                if game.has_local_backup {
-                    self.upload_single(game);
-                } else {
-                    Toast::show("No local backup. Create one in Games tab.".to_string());
-                }
+                self.upload_single(game);
             }
             SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => {
                 self.download_single(game);
