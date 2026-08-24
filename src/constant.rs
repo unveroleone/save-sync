@@ -23,8 +23,6 @@ pub const PSV_DEVICES: [&str; 11] = [
     "ux0:", "uma0:", "grw0:", "os0:", "pd0:", "sa0:", "tm0:", "ud0:", "ur0:", "vd0:", "vs0:",
 ];
 
-// app data root (replaces ux0:data/save-cloud)
-pub const SAVE_CLOUD_DIR: &str = "ux0:data/save-sync";
 // local backup archive directory (replaces ux0:data/save-cloud/saves)
 pub const GAME_SAVE_LOCAL_DIR: &str = "ux0:data/save-sync/backups";
 // config and manifest

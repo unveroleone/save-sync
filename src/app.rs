@@ -33,10 +33,6 @@ impl App {
         }
     }
 
-    pub fn add_ui(&mut self, ui: Box<dyn UIBase>) {
-        self.uis.push(ui);
-    }
-
     pub fn update(&mut self, buttons: u32) -> bool {
         match self.uis.iter_mut().find(|ui| ui.is_forces()) {
             Some(ui) => {

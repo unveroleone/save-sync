@@ -587,7 +587,4 @@ impl UISettings {
         "••••••••".to_string()
     }
 
-    pub fn get_config(&self) -> &Config {
-        &self.config
-    }
 }
