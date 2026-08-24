@@ -1,5 +1,3 @@
-pub mod list_state;
-
 use std::{
     path::Path,
     sync::{
@@ -105,9 +103,12 @@ impl UICloud {
                 None
             };
 
-            // Build per-game info
+            // Build per-game info, dropping sync-excluded entries.
             let mut info_list = Vec::new();
             for (title_id, name) in &title_list {
+                if config.is_effectively_excluded(title_id, None) {
+                    continue;
+                }
                 let local_dir = get_game_local_backup_dir(title_id, name);
                 let info = Self::build_sync_info(
                     title_id, name, name, &local_dir, &manifest,
@@ -121,18 +122,22 @@ impl UICloud {
                 .map(|(id, _)| id.clone())
                 .collect();
             for entry in &emu_entries {
+                seen_ids.insert(entry.id.clone()); // even if excluded below
+                if config.is_effectively_excluded(&entry.id, Some(entry.kind)) {
+                    continue;
+                }
                 let local_dir = entry.local_backup_dir();
                 let info = Self::build_sync_info(
                     &entry.id, &entry.name, &entry.server_title, &local_dir, &manifest,
                 );
-                seen_ids.insert(entry.id.clone());
                 info_list.push(info);
             }
 
-            // Add pure-cloud entries (server has them, but no local folder)
+            // Add pure-cloud entries (server has them, but no local folder).
             if let Some(ref m) = manifest {
                 for (id, entry) in &m.games {
-                    if !seen_ids.contains(id) {
+                    let kind = crate::emulator::emulator_kind_from_entry_id(id);
+                    if !seen_ids.contains(id) && !config.is_effectively_excluded(id, kind) {
                         // The server labels the save with the game title when
                         // it was uploaded with one; fall back to the id.
                         let display_name = entry
@@ -705,9 +710,7 @@ impl UIBase for UICloud {
                 settings.update(app_data, buttons);
                 if settings.should_close {
                     if settings.dirty {
-                        let config = settings.get_config().clone();
-                        config.save();
-                        Config::update_global(config);
+                        Config::commit(settings.get_config().clone());
                         Toast::show("Settings saved.".to_string());
                     }
                     self.show_settings = false;
