@@ -30,7 +30,7 @@ One server, multiple clients. All saves go to the same place.
 **PS Vita app**:
 - Backs up native PS Vita saves, PSP/Adrenaline saves, and RetroArch saves
 - Uploads to your server as a zip, downloads and restores on another Vita
-- Shows per-game sync status on the Cloud tab with one-tap Sync All
+- Shows a per-game sync status badge right on the game grid, with one-button sync per game and one-button Sync All
 
 > **Note on native Vita saves:** PSP and RetroArch saves transfer reliably between devices. Native PS Vita saves are encrypted with a mix of your PSN account and hardware keys, so results vary. Same PSN account on both Vitas works for many titles but is not guaranteed for all. If a save does not load after restoring, use a tool like [Apollo Save Tool](https://github.com/bucanero/apollo-vita) to resign it.
 
@@ -275,11 +275,10 @@ Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/i
 
 1. Install the VPK
 2. Open Save Sync
-3. Press **R** to switch to the Cloud tab
-4. Press **Triangle** to open Settings
-5. Fill in **Server URL** (e.g. `https://vita-sync.example.com`), **API Token**, and **Device Name**
-6. Select **Test Connection** (checks both reachability and your token)
-7. Press **o** to go back, or select **Save && Back**
+3. Press **R** to switch to the Settings tab
+4. Fill in **Server URL** (e.g. `https://vita-sync.example.com`), **API Token**, and **Device Name** — each saves as soon as you enter it
+5. Select **Test Connection** (checks both reachability and your token)
+6. Press **L** to go back to your game list
 
 
 <img src="assets/icons/games.png" width="480" alt="Save Sync on PS Vita">
@@ -324,39 +323,38 @@ Save IDs on the server use the folder name as the title ID, prefixed with `PSP_`
 
 ## Workflow (PS Vita)
 
-### Cloud tab (the main way to sync)
+### Games tab (the main way to sync)
 
-Press **R** to switch to the Cloud tab. Every game shows a sync status badge:
+This is the only tab you need for day-to-day syncing. Every game on the grid shows a sync status badge:
 
 | Badge | Meaning |
 |-------|---------|
 | Synced | In sync with server |
-| Not Uploaded | Never uploaded to server |
-| Upload | Local is newer |
-| Download | Server has a newer version |
-| Cloud Only | On server, not on this Vita |
+| Upload Needed | Local is newer, or never uploaded |
+| Download Needed | Server has a newer version, or is on the server but not on this Vita |
 | Conflict | Both sides changed |
 
-**X on a game** uploads (if marked Upload) or downloads and restores directly (if marked Download or Cloud Only). One step.
+**Triangle** syncs the selected game: uploads if it needs uploading (creating a local backup first if there isn't one yet), or downloads and restores if the server has something newer. One button.
 
-**Square** runs Sync All. It uploads everything marked Upload and downloads everything marked Download. Conflicts are reported but not touched.
+**Circle** runs Sync All — the same thing for every game at once. Uploads everything that needs uploading, downloads and restores everything the server has newer, including native Vita titles. Conflicts are reported but left alone; press circle during a run to stop after the current game.
 
-**Triangle** opens Settings.
+**Square** shows About.
 
-<img src="assets/icons/cloud.png" width="480" alt="Save Sync Cloud tab">
+<img src="assets/icons/games.png" width="480" alt="Save Sync Games tab">
 
+### X — Local backups and manual actions
 
-### Games tab (local saves only)
+Select a game and press **X** to open its drawer:
 
-Press **L** to see your local saves. Select a game and press **X** to open the save drawer:
-
-- **Local Backup** tab (press **L** in the drawer) manages save slots on the Vita itself, independent of the server. Use it to keep manual snapshots or restore a previous local slot.
-- **Server Backup** tab (press **R** in the drawer) has manual Upload, Download, and Download & Restore options.
-
-For daily use, the Cloud tab is faster. The drawer is there for the manual actions.
+- **Local Backup** tab (press **L** in the drawer): save slots on the Vita itself, independent of the server. Use it for manual snapshots, or to restore an older local slot — this is also where a fresh local backup gets made from scratch (**New Backup**).
+- **Manage** tab (press **R** in the drawer): **Upload to Server**, **Restore from Server**, **Delete from Server**, plus per-game management — launch the game, update the account ID stamped in the save, delete the live save data or its local backups, pick which PSP save folders to include, and exclude this game from sync entirely.
 
 <img src="assets/icons/game2.png" width="480" alt="Save Sync save drawer">
 <img src="assets/icons/game1.png" width="480" alt="Save Sync save drawer">
+
+### Settings
+
+Press **R** from the Games tab to switch to Settings — server URL/token/device name, connection test, paired devices, and per-game or whole-platform sync exclusions (handy for RetroArch, which already syncs its own saves). Every change saves immediately; press **L** to go back.
 
 ---
 
