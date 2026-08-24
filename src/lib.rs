@@ -6,6 +6,7 @@ pub mod emulator;
 pub mod ime;
 pub mod log;
 pub mod sync;
+pub mod sync_engine;
 pub mod tai;
 pub mod ui;
 pub mod utils;
