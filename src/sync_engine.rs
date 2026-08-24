@@ -19,7 +19,7 @@ use crate::{
     utils::{
         backup_game_save, backup_save_target, get_game_local_backup_dir,
         read_content_hash_sidecar, restore_save_target, save_target_for_downloaded_archive,
-        sha256_file,
+        sha256_file, SaveTarget,
     },
     vita2d::rgba,
 };
@@ -337,10 +337,8 @@ impl SyncEngine {
         });
     }
 
-    /// Download a single game from server to local backup dir. PSP and
-    /// RetroArch saves are also restored through the normal restore path so
-    /// the live save is auto-backed up first; native saves stay download-only
-    /// because restoring them needs a PFS mount from the Games tab.
+    /// Download a single game from server to local backup dir, then restore
+    /// it in place (PSP/RetroArch directly, native titles via a PFS mount).
     pub fn download_single(&self, game: &SyncGameInfo) {
         let config = Config::global();
         if !config.is_configured() {
@@ -352,6 +350,11 @@ impl SyncEngine {
         let dl_path = format!("{}/{}.zip", local_dir, crate::ime::get_current_format_time());
         let tid = game.title_id.to_string();
         let n = game.name.to_string();
+        self.pfs_mount.clear();
+        self.cancel.store(false, Ordering::Relaxed);
+        let pfs_mount = self.pfs_mount.clone();
+        let cancel = Arc::clone(&self.cancel);
+        let game = game.clone();
         let pending = Arc::clone(&self.pending);
         let games = Arc::clone(&self.games);
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
@@ -364,16 +367,13 @@ impl SyncEngine {
             match Api::download_save(&config, &tid, &dl_path) {
                 Ok(_) => {
                     downloaded = true;
-                    if let Some(target) = save_target_for_downloaded_archive(&tid, &dl_path) {
-                        match restore_save_target(&target, &dl_path) {
-                            Ok(_) => Toast::show(format!("{} downloaded & restored.", n)),
-                            Err(e) => {
-                                error!("restore {} failed: {}", tid, e);
-                                Toast::show(format!("{} downloaded; restore failed: {}", n, e));
-                            }
+                    match Self::restore_downloaded(&game, &dl_path, &pfs_mount, &cancel) {
+                        Ok(true) => Toast::show(format!("{} downloaded & restored.", n)),
+                        Ok(false) => Toast::show(format!("{} downloaded.", n)),
+                        Err(e) => {
+                            error!("restore {} failed: {}", tid, e);
+                            Toast::show(format!("{} downloaded; restore failed: {}", n, e));
                         }
-                    } else {
-                        Toast::show(format!("{} downloaded.", n));
                     }
                 }
                 Err(e) => Toast::show(format!("Download failed: {}", e)),
@@ -569,16 +569,12 @@ impl SyncEngine {
                     Ok(_) => {
                         downloaded.push((game.title_id.clone(), dl_path.clone()));
                         ok += 1;
-                        // PSP/RetroArch restore through the normal path, which
-                        // auto-backs-up the live save first. Native titles stay
-                        // download-only: restoring them needs a PFS mount from
-                        // the Games tab (out of scope here, see plan doc).
-                        if let Some(target) =
-                            save_target_for_downloaded_archive(&game.title_id, &dl_path)
+                        // Restores in place (PSP/RetroArch directly, native
+                        // via PFS mount), auto-backing-up the live save first.
+                        if let Err(e) =
+                            Self::restore_downloaded(game, &dl_path, &pfs_mount, &cancel)
                         {
-                            if let Err(e) = restore_save_target(&target, &dl_path) {
-                                error!("restore {} failed: {}", game.title_id, e);
-                            }
+                            error!("restore {} failed: {}", game.title_id, e);
                         }
                     }
                     Err(e) => {
@@ -641,18 +637,12 @@ impl SyncEngine {
             crate::ime::get_current_format_time()
         );
         if let Some(real_id) = &game.real_id {
-            let dirs = [
-                format!("{}/{}", GAME_CARD_SAVE_DIR, real_id),
-                format!("{}/{}", GAME_SAVE_DIR, real_id),
-            ];
-            let game_save_dir = dirs
-                .iter()
-                .find(|dir| Path::new(dir).exists())
-                .ok_or_else(|| "no save data".to_string())?;
-            if !pfs_mount.wait_for_mount(cancel, game_save_dir) {
+            let game_save_dir =
+                Self::native_save_dir(real_id).ok_or_else(|| "no save data".to_string())?;
+            if !pfs_mount.wait_for_mount(cancel, &game_save_dir) {
                 return Err("cancelled".to_string());
             }
-            backup_game_save(game_save_dir, &backup_to_path).map_err(|e| format!("{:?}", e))?;
+            backup_game_save(&game_save_dir, &backup_to_path).map_err(|e| format!("{:?}", e))?;
             return Ok(backup_to_path);
         }
         if let Some(entry) = scan_emulator_entries()
@@ -665,6 +655,44 @@ impl SyncEngine {
             return Ok(backup_to_path);
         }
         Err("no local backup".to_string())
+    }
+
+    /// A native title's live save directory, whichever of the card/internal
+    /// paths actually exists.
+    fn native_save_dir(real_id: &str) -> Option<String> {
+        [
+            format!("{}/{}", GAME_CARD_SAVE_DIR, real_id),
+            format!("{}/{}", GAME_SAVE_DIR, real_id),
+        ]
+        .into_iter()
+        .find(|dir| Path::new(dir).exists())
+    }
+
+    /// Restore a just-downloaded archive in place: PSP/RetroArch saves
+    /// restore directly, native titles restore via a PFS-mounted SaveTarget
+    /// built from their real_id. `Ok(false)` means there was nothing to
+    /// restore into (not an error, just download-only).
+    fn restore_downloaded(
+        game: &SyncGameInfo,
+        dl_path: &str,
+        pfs_mount: &PfsMountHandshake,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<bool, String> {
+        if let Some(target) = save_target_for_downloaded_archive(&game.title_id, dl_path) {
+            restore_save_target(&target, dl_path).map_err(|e| e.to_string())?;
+            return Ok(true);
+        }
+        if let Some(real_id) = &game.real_id {
+            if let Some(game_save_dir) = Self::native_save_dir(real_id) {
+                if !pfs_mount.wait_for_mount(cancel, &game_save_dir) {
+                    return Err("cancelled".to_string());
+                }
+                let target = SaveTarget::single(&game_save_dir);
+                restore_save_target(&target, dl_path).map_err(|e| e.to_string())?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn find_newest_zip(dir: &str) -> Option<String> {
