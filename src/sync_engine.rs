@@ -267,11 +267,20 @@ impl SyncEngine {
                 if pending.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
                     break;
                 }
+                // spawn_blocking: these are blocking reads (a PFS mount wait
+                // sleeps in a loop), and running them directly here starved
+                // the small async worker pool other tasks (icon loads) share.
                 let (title_id, live_hash) = match target {
                     CheckTarget::Emulator(entry) => {
                         let exclusions = config.psp_exclusions_for(&entry.id);
                         let live_target = entry.save_target_excluding(&exclusions);
-                        (entry.id.clone(), content_hash_sources(&live_target.sources))
+                        let sources = live_target.sources;
+                        let hash = tokio::task::spawn_blocking(move || {
+                            content_hash_sources(&sources)
+                        })
+                        .await
+                        .unwrap_or(None);
+                        (entry.id.clone(), hash)
                     }
                     CheckTarget::Native { title_id, real_id } => {
                         let Some(game_save_dir) = Self::native_save_dir(&real_id) else {
@@ -288,14 +297,31 @@ impl SyncEngine {
                             }
                             continue;
                         };
-                        if !pfs_mount.wait_for_mount(&cancel, &game_save_dir) {
+                        // One spawn_blocking for both: hash needs the mount
+                        // first anyway, no async work in between.
+                        let pfs_mount_bg = pfs_mount.clone();
+                        let cancel_bg = Arc::clone(&cancel);
+                        let dir_bg = game_save_dir.clone();
+                        let mount_and_hash = tokio::task::spawn_blocking(move || {
+                            if !pfs_mount_bg.wait_for_mount(&cancel_bg, &dir_bg) {
+                                return Err(());
+                            }
+                            let sources = SaveTarget::single(&dir_bg).sources;
+                            Ok(content_hash_sources(&sources))
+                        })
+                        .await
+                        .unwrap_or(Err(()));
+                        let Ok(hash) = mount_and_hash else {
                             break;
-                        }
-                        (
-                            title_id,
-                            content_hash_sources(&SaveTarget::single(&game_save_dir).sources),
-                        )
+                        };
+                        (title_id, hash)
                     }
+                };
+                // A live dir/mount exists here, so None means the hash read
+                // itself failed — leave `checking` and retry next fetch
+                // rather than let status_for read it as "nothing to compare".
+                let Some(live_hash) = live_hash else {
+                    continue;
                 };
                 let cloud_data = manifest.as_ref().and_then(|m| m.games.get(&title_id));
                 let last_synced_hash = LocalManifest::load()
@@ -305,7 +331,7 @@ impl SyncEngine {
                 let status = status_for(
                     true,
                     cloud_data.is_some(),
-                    live_hash.as_deref(),
+                    Some(&live_hash),
                     cloud_data.and_then(|ce| ce.content_hash.as_deref()),
                     last_synced_hash.as_deref(),
                 );
@@ -318,6 +344,56 @@ impl SyncEngine {
                 }
             }
         });
+    }
+
+    /// Re-fetches the cloud manifest, updating the shared cache on success;
+    /// falls back to the cached value on failure. The `bool` says whether
+    /// the result is actually fresh.
+    fn refresh_cloud_manifest(
+        config: &Config,
+        cloud_manifest: &RwLock<Option<CloudManifest>>,
+    ) -> (Option<CloudManifest>, bool) {
+        match Api::get_cloud_manifest(config) {
+            Ok(m) => {
+                *cloud_manifest.write().unwrap() = Some(m.clone());
+                (Some(m), true)
+            }
+            Err(_) => (cloud_manifest.read().unwrap().clone(), false),
+        }
+    }
+
+    /// Recomputes and applies one entry's status from its local backup dir
+    /// and the given (already up to date) cloud manifest.
+    fn apply_single_status(
+        games: &Arc<RwLock<Vec<SyncGameInfo>>>,
+        title_id: &str,
+        local_dir: &str,
+        manifest: &Option<CloudManifest>,
+    ) {
+        let (has_local, _local_time, local_content) = Self::scan_local_backup(local_dir);
+        let cloud_data = manifest.as_ref().and_then(|m| m.games.get(title_id));
+        let last_synced_hash = LocalManifest::load()
+            .games
+            .get(title_id)
+            .and_then(|e| e.last_synced_hash.clone());
+        let status = status_for(
+            has_local,
+            cloud_data.is_some(),
+            local_content.as_deref(),
+            cloud_data.and_then(|ce| ce.content_hash.as_deref()),
+            last_synced_hash.as_deref(),
+        );
+
+        if let Ok(mut games) = games.write() {
+            if let Some(g) = games.iter_mut().find(|g| g.title_id == title_id) {
+                g.status = status;
+                g.has_local_backup = has_local;
+                g.checking = false;
+                g.cloud_time = cloud_data.map(|c| c.latest_version.clone());
+                g.cloud_size = cloud_data.map(|c| c.size);
+                g.version_count = cloud_data.map(|c| c.version_count).unwrap_or(0);
+            }
+        }
     }
 
     fn build_sync_info(
@@ -450,10 +526,8 @@ impl SyncEngine {
                 }
                 Err(e) => Toast::show(format!("Upload failed: {}", e)),
             }
-            if let Ok(m) = Api::get_cloud_manifest(&config) {
-                *cloud_manifest.write().unwrap() = Some(m);
-            }
-            games.write().unwrap().clear();
+            let (manifest, _) = Self::refresh_cloud_manifest(&config, &cloud_manifest);
+            Self::apply_single_status(&games, &tid, &game.local_dir, &manifest);
             Loading::hide();
             pending.store(false, Ordering::Relaxed);
         });
@@ -486,12 +560,19 @@ impl SyncEngine {
         tokio::spawn(async move {
             let config = Config::global();
             let mut downloaded = false;
+            let mut restore_ok = false;
             match Api::download_save(&config, &tid, &dl_path) {
                 Ok(_) => {
                     downloaded = true;
                     match Self::restore_downloaded(&game, &dl_path, &pfs_mount, &cancel) {
-                        Ok(true) => Toast::show(format!("{} downloaded & restored.", n)),
-                        Ok(false) => Toast::show(format!("{} downloaded.", n)),
+                        Ok(true) => {
+                            restore_ok = true;
+                            Toast::show(format!("{} downloaded & restored.", n));
+                        }
+                        Ok(false) => {
+                            restore_ok = true;
+                            Toast::show(format!("{} downloaded.", n));
+                        }
                         Err(e) => {
                             error!("restore {} failed: {}", tid, e);
                             Toast::show(format!("{} downloaded; restore failed: {}", n, e));
@@ -501,18 +582,21 @@ impl SyncEngine {
                 Err(e) => Toast::show(format!("Download failed: {}", e)),
             }
             if downloaded {
-                if let Ok(m) = Api::get_cloud_manifest(&config) {
-                    // Stamp the downloaded zip with the server's content hash
-                    // so the next scan compares this save against the cloud
-                    // instead of falling back to "exists".
-                    if let Some(ch) = m.games.get(&tid).and_then(|ce| ce.content_hash.clone()) {
+                let (manifest, fresh) = Self::refresh_cloud_manifest(&config, &cloud_manifest);
+                // Only stamp when restored and the manifest is actually
+                // fresh — a stale cache fallback could predate this download.
+                if restore_ok && fresh {
+                    if let Some(ch) = manifest
+                        .as_ref()
+                        .and_then(|m| m.games.get(&tid))
+                        .and_then(|ce| ce.content_hash.clone())
+                    {
                         let _ = std::fs::write(format!("{}.chash", dl_path), &ch);
                         LocalManifest::record(&tid, &ch);
                     }
-                    *cloud_manifest.write().unwrap() = Some(m);
                 }
+                Self::apply_single_status(&games, &tid, &local_dir, &manifest);
             }
-            games.write().unwrap().clear();
             Loading::hide();
             pending.store(false, Ordering::Relaxed);
         });
@@ -598,14 +682,8 @@ impl SyncEngine {
             return;
         }
 
-        if !UIDialog::present(&format!(
-            "Sync: {} upload(s), {} download(s)?",
-            upload_needed.len(),
-            download_available.len()
-        )) {
-            return;
-        }
-
+        // No confirmation dialog: both directions already auto-back-up
+        // before touching anything, and conflicts are excluded above.
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
         self.cancel.store(false, Ordering::Relaxed);
@@ -624,6 +702,9 @@ impl SyncEngine {
             let mut cancelled = false;
             let mut failures: Vec<(String, String)> = Vec::new();
             let mut downloaded: Vec<(String, String)> = Vec::new();
+            // Downloaded but failed to restore — tracked separately from
+            // `failures` since the title did sync, it's just not usable yet.
+            let mut restore_failures: Vec<(String, String)> = Vec::new();
 
             for (i, game) in upload_needed.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
@@ -697,14 +778,25 @@ impl SyncEngine {
                 );
                 match Api::download_save(&config, &game.title_id, &dl_path) {
                     Ok(_) => {
-                        downloaded.push((game.title_id.clone(), dl_path.clone()));
                         ok += 1;
                         // Restores in place (PSP/RetroArch directly, native
                         // via PFS mount), auto-backing-up the live save first.
-                        if let Err(e) =
-                            Self::restore_downloaded(game, &dl_path, &pfs_mount, &cancel)
-                        {
-                            error!("restore {} failed: {}", game.title_id, e);
+                        // The download itself already succeeded (counted
+                        // above), so a restore failure here is reported
+                        // separately rather than turning this into an
+                        // overall failure for the title. It also means this
+                        // title must NOT be stamped into the local manifest
+                        // below — the live save was never actually updated,
+                        // so recording the cloud hash would mark it in-sync
+                        // when it isn't.
+                        match Self::restore_downloaded(game, &dl_path, &pfs_mount, &cancel) {
+                            Ok(_) => {
+                                downloaded.push((game.title_id.clone(), dl_path.clone()));
+                            }
+                            Err(e) => {
+                                error!("restore {} failed: {}", game.title_id, e);
+                                restore_failures.push((game.title_id.clone(), e));
+                            }
                         }
                     }
                     Err(e) => {
@@ -727,19 +819,15 @@ impl SyncEngine {
                 Err(e) => error!("re-fetch manifest failed: {}", e),
             }
 
-            let fail_count = failures.len();
+            // Counts only — per-title reasons are in the error log above.
             let head = if cancelled { "Sync stopped" } else { "Sync done" };
-            let msg = if fail_count == 0 {
-                format!("{}: {} ok", head, ok)
-            } else if fail_count <= 2 {
-                let names: Vec<String> = failures
-                    .iter()
-                    .map(|(id, err)| format!("{}: {}", id, err))
-                    .collect();
-                format!("{}: {} ok, {} failed ({})", head, ok, fail_count, names.join(", "))
-            } else {
-                format!("{}: {} ok, {} failed", head, ok, fail_count)
-            };
+            let mut msg = format!("{}: {} ok", head, ok);
+            if !failures.is_empty() {
+                msg.push_str(&format!(", {} failed", failures.len()));
+            }
+            if !restore_failures.is_empty() {
+                msg.push_str(&format!(", {} not restored", restore_failures.len()));
+            }
             Toast::show(msg);
             Loading::hide();
             pending.store(false, Ordering::Relaxed);

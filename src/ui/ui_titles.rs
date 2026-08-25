@@ -227,7 +227,9 @@ impl UITitles {
 
                     let iconpath = title.iconpath().to_string();
                     let icon_bufs = Arc::clone(&self.icon_bufs);
-                    tokio::spawn(async move {
+                    // spawn_blocking: a plain fs::read would otherwise tie up
+                    // one of the few async worker threads for its duration.
+                    tokio::task::spawn_blocking(move || {
                         if Path::new(&iconpath).exists() {
                             match fs::read(&iconpath) {
                                 Ok(file) => {
@@ -275,7 +277,7 @@ impl UITitles {
 
                         let path = icon_path.clone();
                         let icon_bufs = Arc::clone(&self.icon_bufs);
-                        tokio::spawn(async move {
+                        tokio::task::spawn_blocking(move || {
                             if Path::new(&path).exists() {
                                 match fs::read(&path) {
                                     Ok(file) => {
