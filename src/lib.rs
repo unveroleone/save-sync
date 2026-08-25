@@ -5,6 +5,7 @@ pub mod constant;
 pub mod emulator;
 pub mod ime;
 pub mod log;
+pub mod psx_vmp;
 pub mod sync;
 pub mod sync_engine;
 pub mod tai;
