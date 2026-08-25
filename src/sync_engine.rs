@@ -253,7 +253,7 @@ impl SyncEngine {
             // Nothing local to verify, so these never enter `checks`.
             if let Some(ref m) = manifest {
                 for (id, entry) in &m.games {
-                    let kind = emulator_kind_from_entry_id(id);
+                    let kind = emulator_kind_from_entry_id(id, config.convert_psx_saves);
                     if !seen_ids.contains(id) && !config.is_effectively_excluded(id, kind) {
                         let display_name = entry
                             .title

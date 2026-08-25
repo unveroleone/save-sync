@@ -444,6 +444,7 @@ impl UITitles {
             let emu_idx = (self.selected_idx - native_count) as usize;
             match self.emulator_entries.get(emu_idx).map(|e| &e.kind) {
                 Some(EmulatorKind::Psp) => rgba(0xff, 0x6b, 0x9d, 0xff),
+                Some(EmulatorKind::Psx) => rgba(0x8a, 0x6b, 0xff, 0xff),
                 Some(EmulatorKind::RetroArch) => rgba(0xff, 0x77, 0x00, 0xff),
                 None => get_active_color(),
             }
@@ -549,13 +550,14 @@ impl UITitles {
                 if let Some(entry) = self.emulator_entries.get(emu_idx) {
                     let type_color = match entry.kind {
                         EmulatorKind::Psp => rgba(0xff, 0x6b, 0x9d, 0xff),
+                        EmulatorKind::Psx => rgba(0x8a, 0x6b, 0xff, 0xff),
                         EmulatorKind::RetroArch => rgba(0xff, 0x77, 0x00, 0xff),
                     };
                     let border = 2;
                     let has_icon = self.icons.contains_key(&icon_idx);
                     if has_icon {
                         // ICON0.PNG aspect ratio varies by platform (PSP is
-                        // 144x80, PS1 is 80x80 under Adrenaline). Scale to
+                        // 144x80, PSX is 80x80 under Adrenaline). Scale to
                         // fill the cell height using the texture's real size,
                         // then center-crop width so any ratio lands centered.
                         vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, icon_bg);
@@ -583,6 +585,7 @@ impl UITitles {
                         );
                         let label = match entry.kind {
                             EmulatorKind::Psp => "PSP",
+                            EmulatorKind::Psx => "PSX",
                             EmulatorKind::RetroArch => "RA",
                         };
                         let lw = vita2d_text_width(1.0, label);

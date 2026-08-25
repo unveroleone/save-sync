@@ -26,10 +26,12 @@ pub struct UISettings {
     exclusions_list: ListState,
     native_games: Vec<(String, String)>,
     psp_games: Vec<(String, String)>,
+    psx_games: Vec<(String, String)>,
     retroarch_games: Vec<(String, String)>,
     games_loaded: bool,
     collapsed_native: bool,
     collapsed_psp: bool,
+    collapsed_psx: bool,
     collapsed_retroarch: bool,
     /// Cached; rebuilt on load or fold toggle, not every frame.
     exclusion_rows: Vec<ExclusionRow>,
@@ -40,6 +42,7 @@ pub struct UISettings {
 enum SettingsCategory {
     Native,
     Psp,
+    Psx,
     RetroArch,
 }
 
@@ -64,10 +67,12 @@ impl UISettings {
             exclusions_list: ListState::new(10),
             native_games: Vec::new(),
             psp_games: Vec::new(),
+            psx_games: Vec::new(),
             retroarch_games: Vec::new(),
             games_loaded: false,
             collapsed_native: false,
             collapsed_psp: false,
+            collapsed_psx: false,
             collapsed_retroarch: false,
             exclusion_rows: Vec::new(),
             total_excluded_count: 0,
@@ -78,6 +83,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.collapsed_native,
             SettingsCategory::Psp => self.collapsed_psp,
+            SettingsCategory::Psx => self.collapsed_psx,
             SettingsCategory::RetroArch => self.collapsed_retroarch,
         }
     }
@@ -86,6 +92,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.collapsed_native = collapsed,
             SettingsCategory::Psp => self.collapsed_psp = collapsed,
+            SettingsCategory::Psx => self.collapsed_psx = collapsed,
             SettingsCategory::RetroArch => self.collapsed_retroarch = collapsed,
         }
         self.rebuild_exclusion_rows();
@@ -96,7 +103,9 @@ impl UISettings {
     }
 
     fn field_count(&self) -> i32 {
-        6 // URL, Token, Device Name, Test Connection, Connected Devices, Sync Exclusions
+        // URL, Token, Device Name, Test Connection, Connected Devices,
+        // Sync Exclusions, Convert PSX Saves
+        7
     }
 
     fn load_all_games(&mut self, app_data: &crate::app::AppData) {
@@ -106,10 +115,12 @@ impl UISettings {
             .map(|t| (t.title_id().to_string(), t.name().to_string()))
             .collect();
         self.psp_games.clear();
+        self.psx_games.clear();
         self.retroarch_games.clear();
         for e in crate::emulator::scan_emulator_entries() {
             match e.kind {
                 crate::emulator::EmulatorKind::Psp => self.psp_games.push((e.id, e.name)),
+                crate::emulator::EmulatorKind::Psx => self.psx_games.push((e.id, e.name)),
                 crate::emulator::EmulatorKind::RetroArch => self.retroarch_games.push((e.id, e.name)),
             }
         }
@@ -119,19 +130,22 @@ impl UISettings {
         for (id, name) in LocalManifest::load().cloud_titles {
             let known = self.native_games.iter().any(|(i, _)| i == &id)
                 || self.psp_games.iter().any(|(i, _)| i == &id)
+                || self.psx_games.iter().any(|(i, _)| i == &id)
                 || self.retroarch_games.iter().any(|(i, _)| i == &id);
             if known {
                 continue;
             }
-            match emulator_kind_from_entry_id(&id) {
+            match emulator_kind_from_entry_id(&id, self.config.convert_psx_saves) {
                 None => self.native_games.push((id, name)),
                 Some(EmulatorKind::Psp) => self.psp_games.push((id, name)),
+                Some(EmulatorKind::Psx) => self.psx_games.push((id, name)),
                 Some(EmulatorKind::RetroArch) => self.retroarch_games.push((id, name)),
             }
         }
         // Already-excluded categories start folded.
         self.collapsed_native = self.config.sync_exclude_all_native;
         self.collapsed_psp = self.config.sync_exclude_all_psp;
+        self.collapsed_psx = self.config.sync_exclude_all_psx;
         self.collapsed_retroarch = self.config.sync_exclude_all_retroarch;
         self.rebuild_exclusion_rows();
         self.recompute_total_excluded();
@@ -142,6 +156,7 @@ impl UISettings {
         for (category, games) in [
             (SettingsCategory::Native, &self.native_games),
             (SettingsCategory::Psp, &self.psp_games),
+            (SettingsCategory::Psx, &self.psx_games),
             (SettingsCategory::RetroArch, &self.retroarch_games),
         ] {
             rows.push(ExclusionRow::Category(category));
@@ -169,6 +184,7 @@ impl UISettings {
         };
         self.total_excluded_count = count(&self.native_games, self.config.sync_exclude_all_native)
             + count(&self.psp_games, self.config.sync_exclude_all_psp)
+            + count(&self.psx_games, self.config.sync_exclude_all_psx)
             + count(&self.retroarch_games, self.config.sync_exclude_all_retroarch);
     }
 
@@ -176,6 +192,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.config.sync_exclude_all_native,
             SettingsCategory::Psp => self.config.sync_exclude_all_psp,
+            SettingsCategory::Psx => self.config.sync_exclude_all_psx,
             SettingsCategory::RetroArch => self.config.sync_exclude_all_retroarch,
         }
     }
@@ -184,6 +201,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.config.sync_exclude_all_native = excluded,
             SettingsCategory::Psp => self.config.sync_exclude_all_psp = excluded,
+            SettingsCategory::Psx => self.config.sync_exclude_all_psx = excluded,
             SettingsCategory::RetroArch => self.config.sync_exclude_all_retroarch = excluded,
         }
         self.set_collapsed(category, excluded);
@@ -191,6 +209,7 @@ impl UISettings {
             let games = match category {
                 SettingsCategory::Native => &self.native_games,
                 SettingsCategory::Psp => &self.psp_games,
+                SettingsCategory::Psx => &self.psx_games,
                 SettingsCategory::RetroArch => &self.retroarch_games,
             };
             for (id, _) in games {
@@ -321,11 +340,13 @@ impl UISettings {
                     let count = match category {
                         SettingsCategory::Native => self.native_games.len(),
                         SettingsCategory::Psp => self.psp_games.len(),
+                        SettingsCategory::Psx => self.psx_games.len(),
                         SettingsCategory::RetroArch => self.retroarch_games.len(),
                     };
                     let name = match category {
                         SettingsCategory::Native => "All Native Vita Games",
                         SettingsCategory::Psp => "All PSP Games",
+                        SettingsCategory::Psx => "All PSX Games",
                         SettingsCategory::RetroArch => "All RetroArch Games",
                     };
                     let fold = if self.is_collapsed(*category) { "+" } else { "-" };
@@ -539,6 +560,10 @@ impl UIBase for UISettings {
                     self.exclusions_list.reset();
                     self.exclusions_view = true;
                 }
+                6 => {
+                    self.config.convert_psx_saves = !self.config.convert_psx_saves;
+                    self.commit();
+                }
                 _ => {}
             }
         }
@@ -585,6 +610,13 @@ impl UIBase for UISettings {
             let sw = vita2d_text_width(1.0, &summary);
             vita2d_draw_text(x + (SCREEN_WIDTH - 24) - 16 - sw, y_excl + 22, rgba(0xaa, 0xaa, 0xaa, 0xff), 1.0, &summary);
         }
+
+        self.draw_field(
+            6,
+            "Convert PSX Saves",
+            if self.config.convert_psx_saves { "On" } else { "Off" },
+            false,
+        );
 
         self.draw_testing_overlay();
     }

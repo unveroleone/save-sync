@@ -22,13 +22,20 @@ pub struct Config {
     /// not just unbadged).
     #[serde(default)]
     pub sync_excluded_entries: HashSet<String>,
-    /// Exclude a whole platform at once (native/PSP/RetroArch).
+    /// Exclude a whole platform at once (native/PSP/PSX/RetroArch).
     #[serde(default)]
     pub sync_exclude_all_native: bool,
     #[serde(default)]
     pub sync_exclude_all_psp: bool,
     #[serde(default)]
+    pub sync_exclude_all_psx: bool,
+    #[serde(default)]
     pub sync_exclude_all_retroarch: bool,
+    /// Convert Adrenaline PSX memory cards to raw format for sync, instead
+    /// of syncing the native VMP bytes as-is. Off by default — when off,
+    /// PSX titles are treated exactly like regular PSP saves.
+    #[serde(default)]
+    pub convert_psx_saves: bool,
 }
 
 impl Default for Config {
@@ -44,7 +51,9 @@ impl Default for Config {
             sync_excluded_entries: HashSet::new(),
             sync_exclude_all_native: false,
             sync_exclude_all_psp: false,
+            sync_exclude_all_psx: false,
             sync_exclude_all_retroarch: false,
+            convert_psx_saves: false,
         }
     }
 }
@@ -110,6 +119,7 @@ impl Config {
         match kind {
             None => self.sync_exclude_all_native,
             Some(EmulatorKind::Psp) => self.sync_exclude_all_psp,
+            Some(EmulatorKind::Psx) => self.sync_exclude_all_psx,
             Some(EmulatorKind::RetroArch) => self.sync_exclude_all_retroarch,
         }
     }
