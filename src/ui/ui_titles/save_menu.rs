@@ -170,6 +170,12 @@ impl SaveMenu {
             .unwrap_or(false)
     }
 
+    /// The title_id (once) of an entry whose server-side state changed via
+    /// a Manage-tab action, if any.
+    pub fn take_needs_single_refresh(&mut self) -> Option<String> {
+        self.manage.as_mut().and_then(|list| list.take_needs_single_refresh())
+    }
+
     pub fn update(&mut self, buttons: u32) {
         if self.is_pending() {
             return;

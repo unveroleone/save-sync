@@ -346,6 +346,36 @@ impl SyncEngine {
         });
     }
 
+    /// Recomputes just one entry's status, unlike `fetch()`'s full rescan —
+    /// for a Manage-tab action that changed one game's state on its own.
+    pub fn refresh_one(&self, title_id: &str) {
+        let games = Arc::clone(&self.games);
+        let cloud_manifest = Arc::clone(&self.cloud_manifest);
+        let title_id = title_id.to_string();
+        let config = Config::global();
+
+        tokio::spawn(async move {
+            if config.is_configured() {
+                if let Ok(m) = Api::get_cloud_manifest(&config) {
+                    *cloud_manifest.write().unwrap() = Some(m);
+                }
+            }
+            let manifest = cloud_manifest.read().unwrap().clone();
+
+            let local_dir = games
+                .read()
+                .unwrap()
+                .iter()
+                .find(|g| g.title_id == title_id)
+                .map(|g| g.local_dir.clone());
+            let Some(local_dir) = local_dir else {
+                return;
+            };
+
+            Self::apply_single_status(&games, &title_id, &local_dir, &manifest);
+        });
+    }
+
     /// Re-fetches the cloud manifest, updating the shared cache on success;
     /// falls back to the cached value on failure. The `bool` says whether
     /// the result is actually fresh.

@@ -25,7 +25,7 @@ use crate::{
         ui_toast::Toast,
     },
     utils::{
-        backup_save_target, delete_dir_if_empty, get_active_color, get_game_local_backup_dir,
+        backup_save_target, get_active_color, get_game_local_backup_dir,
         read_content_hash_sidecar, restore_save_target, sha256_file,
         update_sfo_file_with_current_account_id, SaveTarget,
     },
@@ -93,6 +93,10 @@ pub struct SaveListManage {
     /// than one folder can exclude install/DLC data from backups.
     folder_picker: Option<Vec<(String, bool)>>,
     sync_exclusion_changed: bool,
+    /// Shared with spawned upload/restore/delete-from-server/delete tasks
+    /// (which can't hold `&mut self`), so they can flag once they finish
+    /// that this one entry's cached sync status is now stale.
+    needs_single_refresh: Arc<AtomicBool>,
 }
 
 impl SaveListManage {
@@ -139,6 +143,7 @@ impl SaveListManage {
             cloud_entry: Arc::new(RwLock::new(None)),
             folder_picker: None,
             sync_exclusion_changed: false,
+            needs_single_refresh: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -189,6 +194,7 @@ impl SaveListManage {
         let title_id = self.title_id.clone();
         let server_title = self.server_title.clone();
         let cloud_entry = Arc::clone(&self.cloud_entry);
+        let needs_single_refresh = Arc::clone(&self.needs_single_refresh);
 
         let pending = Arc::clone(&self.pending);
         pending.store(true, Ordering::Relaxed);
@@ -228,6 +234,7 @@ impl SaveListManage {
                                 }
                             }
                             LocalManifest::record(&title_id, &content_hash);
+                            needs_single_refresh.store(true, Ordering::Relaxed);
                             Toast::show("Upload complete!".to_string());
                         }
                         Err(e) => {
@@ -240,10 +247,6 @@ impl SaveListManage {
                     error!("backup failed: {:?}", e);
                     Toast::show(format!("Backup failed: {:?}", e));
                 }
-            }
-            if Path::new(&backup_path).exists() {
-                let _ = fs::remove_file(&backup_path);
-                let _ = delete_dir_if_empty(&local_dir);
             }
             Loading::hide();
             pending.store(false, Ordering::Relaxed);
@@ -277,6 +280,7 @@ impl SaveListManage {
         let save_target = save_target.clone();
         let needs_pfs = self.needs_pfs;
         let pending = Arc::clone(&self.pending);
+        let needs_single_refresh = Arc::clone(&self.needs_single_refresh);
         pending.store(true, Ordering::Relaxed);
         Loading::show();
 
@@ -285,25 +289,40 @@ impl SaveListManage {
             let dl_path = format!("{}/{}.zip", local_dir, get_current_format_time());
             match Api::download_save(&config, &title_id, &dl_path) {
                 Ok(_) => {
-                    if let Some(ch) = cloud_content {
-                        let _ = std::fs::write(format!("{}.chash", dl_path), &ch);
-                        LocalManifest::record(&title_id, &ch);
-                    }
-                    if let Some(ref target) = save_target {
+                    // Only stamp the local manifest/chash once the save is
+                    // actually restored (or there's nothing to restore) — if
+                    // restore fails, the live save still holds the old
+                    // content, so recording the cloud hash here would mark
+                    // this title in-sync when it isn't.
+                    let restore_ok = if let Some(ref target) = save_target {
                         if needs_pfs {
                             mount_pfs(&target.restore_root);
                         }
                         Loading::notify_title("Restoring save...".to_string());
                         match restore_save_target(target, &dl_path) {
-                            Ok(_) => Toast::show("Save restored!".to_string()),
+                            Ok(_) => {
+                                Toast::show("Save restored!".to_string());
+                                true
+                            }
                             Err(e) => {
                                 error!("restore failed: {:?}", e);
                                 Toast::show(format!("Restore failed: {}", e));
+                                false
                             }
                         }
                     } else {
                         Toast::show("Downloaded (no save target to restore into).".to_string());
+                        true
+                    };
+                    if restore_ok {
+                        if let Some(ch) = cloud_content {
+                            let _ = std::fs::write(format!("{}.chash", dl_path), &ch);
+                            LocalManifest::record(&title_id, &ch);
+                        }
                     }
+                    // Set only now that the record above (if any) has
+                    // actually landed.
+                    needs_single_refresh.store(true, Ordering::Relaxed);
                 }
                 Err(e) => {
                     error!("download failed: {}", e);
@@ -331,12 +350,14 @@ impl SaveListManage {
         let title_id = self.title_id.clone();
         let cloud_entry = Arc::clone(&self.cloud_entry);
         let pending = Arc::clone(&self.pending);
+        let needs_single_refresh = Arc::clone(&self.needs_single_refresh);
         pending.store(true, Ordering::Relaxed);
         Loading::show();
         tokio::spawn(async move {
             match Api::delete_save(&config, &title_id) {
                 Ok(_) => {
                     *cloud_entry.write().unwrap() = None;
+                    needs_single_refresh.store(true, Ordering::Relaxed);
                     Toast::show("Deleted from server.".to_string());
                 }
                 Err(e) => {
@@ -354,6 +375,7 @@ impl SaveListManage {
         let real_id = real_id.to_string();
         let name = self.title_name.clone();
         let pending = Arc::clone(&self.pending);
+        let needs_single_refresh = Arc::clone(&self.needs_single_refresh);
         pending.store(true, Ordering::Relaxed);
         Loading::show();
         unmount_pfs();
@@ -367,6 +389,7 @@ impl SaveListManage {
                     error!("remove {} failed: {}", game_save_dir, err);
                     Toast::show(format!("Failed to delete {} save!", name));
                 } else {
+                    needs_single_refresh.store(true, Ordering::Relaxed);
                     Toast::show(format!("Deleted {} save!", name));
                 }
             } else {
@@ -382,6 +405,7 @@ impl SaveListManage {
         let local_dir = self.local_dir.clone();
         let name = self.title_name.clone();
         let pending = Arc::clone(&self.pending);
+        let needs_single_refresh = Arc::clone(&self.needs_single_refresh);
         pending.store(true, Ordering::Relaxed);
         Loading::show();
         tokio::spawn(async move {
@@ -390,6 +414,7 @@ impl SaveListManage {
                     error!("remove {} failed: {}", local_dir, err);
                     Toast::show(format!("Failed to delete {} local backup!", name));
                 } else {
+                    needs_single_refresh.store(true, Ordering::Relaxed);
                     Toast::show(format!("Deleted {} local backup!", name));
                 }
             } else {
@@ -472,12 +497,16 @@ impl UIList for SaveListManage {
         self.folder_picker.is_some()
     }
 
-    fn sync_exclusion_changed(&self) -> bool {
-        self.sync_exclusion_changed
-    }
-
     fn take_sync_exclusion_changed(&mut self) -> bool {
         std::mem::take(&mut self.sync_exclusion_changed)
+    }
+
+    fn take_needs_single_refresh(&mut self) -> Option<String> {
+        if self.needs_single_refresh.swap(false, Ordering::Relaxed) {
+            Some(self.title_id.clone())
+        } else {
+            None
+        }
     }
 
     fn do_backup_game_save(&self, save_target: &Option<SaveTarget>, _input: Option<String>) {

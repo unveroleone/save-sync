@@ -553,6 +553,9 @@ impl UIBase for UITitles {
             if self.save_menu.take_sync_exclusion_changed() {
                 self.refresh_sync_filters(app_data);
             }
+            if let Some(title_id) = self.save_menu.take_needs_single_refresh() {
+                self.sync_engine.refresh_one(&title_id);
+            }
         } else if self.sync_engine.pending.load(Ordering::Relaxed) {
             // Sync (single or all) holds all input, so circle is free to
             // mean "stop". No confirmation dialog: it would block the main

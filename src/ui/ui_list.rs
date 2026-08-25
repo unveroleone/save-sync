@@ -21,11 +21,18 @@ pub trait UIList {
         false
     }
 
-    fn sync_exclusion_changed(&self) -> bool {
+    /// True (once) if an exclusion changed since the last check — the
+    /// grid's membership itself may have changed, so this calls for a full
+    /// re-scan, not just one entry's status.
+    fn take_sync_exclusion_changed(&mut self) -> bool {
         false
     }
 
-    fn take_sync_exclusion_changed(&mut self) -> bool {
-        false
+    /// The title_id (once) of an entry whose server-side state changed via
+    /// a Manage-tab action (upload/restore/delete-from-server, or a local
+    /// delete) — membership doesn't change, so only that one entry's
+    /// status needs recomputing, not every entry's.
+    fn take_needs_single_refresh(&mut self) -> Option<String> {
+        None
     }
 }
