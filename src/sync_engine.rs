@@ -13,7 +13,7 @@ use crate::{
     api::{Api, CloudManifest},
     config::Config,
     constant::{CANCEL_HINT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
-    emulator::{emulator_kind_from_entry_id, scan_emulator_entries, EmulatorEntry},
+    emulator::{emulator_kind_from_entry_id, scan_emulator_entries, EmulatorEntry, EmulatorKind},
     sync::{status_for, LocalManifest, SyncStatus},
     tai::{PfsMountHandshake, Titles},
     ui::{ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast},
@@ -31,6 +31,15 @@ use crate::{
 /// pass it in rather than getting a one-size-fits-all message.
 fn status_not_ready(reason: &str) -> String {
     format!("Sync status not ready ({}), try again in a moment.", reason)
+}
+
+/// True for a PSX save this device can never restore: cloud-only (no local
+/// scan ever found it) and PSX specifically. Restoring one needs a real
+/// PARAM.SFO already on this device — its integrity fields need KIRK
+/// hardware crypto this app can't reach.
+fn cannot_restore_here(game: &SyncGameInfo, convert_psx_saves: bool) -> bool {
+    game.is_pure_cloud
+        && emulator_kind_from_entry_id(&game.title_id, convert_psx_saves) == Some(EmulatorKind::Psx)
 }
 
 #[derive(Clone)]
@@ -683,6 +692,12 @@ impl SyncEngine {
             Toast::show(status_not_ready("still checking this save"));
             return;
         }
+        if cannot_restore_here(game, Config::global().convert_psx_saves) {
+            Toast::show(
+                "Can't restore here — never launched via Adrenaline on this device.".to_string(),
+            );
+            return;
+        }
         match game.status {
             SyncStatus::UploadNeeded | SyncStatus::LocalOnly => {
                 self.upload_single(game);
@@ -738,6 +753,7 @@ impl SyncEngine {
             .filter(|g| {
                 config.download_on_sync_all
                     && matches!(g.status, SyncStatus::DownloadAvailable | SyncStatus::CloudOnly)
+                    && !cannot_restore_here(g, config.convert_psx_saves)
             })
             .cloned()
             .collect();
