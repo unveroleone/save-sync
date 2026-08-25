@@ -500,7 +500,8 @@ impl SyncEngine {
         Loading::show();
         tokio::spawn(async move {
             let config = Config::global();
-            let zip_path = match Self::ensure_backup(&game, &pfs_mount, &cancel) {
+            let emulator_entries = scan_emulator_entries();
+            let zip_path = match Self::ensure_backup(&game, &pfs_mount, &cancel, &emulator_entries) {
                 Ok(path) => path,
                 Err(err) => {
                     Toast::show(format!("Backup failed: {}", err));
@@ -705,6 +706,8 @@ impl SyncEngine {
             // Downloaded but failed to restore — tracked separately from
             // `failures` since the title did sync, it's just not usable yet.
             let mut restore_failures: Vec<(String, String)> = Vec::new();
+            // Scanned once, not per game.
+            let emulator_entries = scan_emulator_entries();
 
             for (i, game) in upload_needed.iter().enumerate() {
                 if cancel.load(Ordering::Relaxed) {
@@ -718,7 +721,7 @@ impl SyncEngine {
                     CANCEL_HINT
                 ));
                 Loading::notify_desc(game.name.to_string());
-                let zip_path = match Self::ensure_backup(game, &pfs_mount, &cancel) {
+                let zip_path = match Self::ensure_backup(game, &pfs_mount, &cancel, &emulator_entries) {
                     Ok(path) => path,
                     Err(err) => {
                         if err == "cancelled" {
@@ -845,6 +848,7 @@ impl SyncEngine {
         game: &SyncGameInfo,
         pfs_mount: &PfsMountHandshake,
         cancel: &Arc<AtomicBool>,
+        emulator_entries: &[EmulatorEntry],
     ) -> Result<String, String> {
         let backup_to_path = format!(
             "{}/{}.zip",
@@ -860,10 +864,7 @@ impl SyncEngine {
             backup_game_save(&game_save_dir, &backup_to_path).map_err(|e| format!("{:?}", e))?;
             return Ok(backup_to_path);
         }
-        if let Some(entry) = scan_emulator_entries()
-            .into_iter()
-            .find(|e| e.id == game.title_id)
-        {
+        if let Some(entry) = emulator_entries.iter().find(|e| e.id == game.title_id) {
             let exclusions = Config::global().psp_exclusions_for(&entry.id);
             backup_save_target(&entry.save_target_excluding(&exclusions), &backup_to_path)
                 .map_err(|e| format!("{:?}", e))?;
