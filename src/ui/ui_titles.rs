@@ -35,6 +35,12 @@ const ICON_ROW: i32 = 4;
 const OFFSET_TOP: i32 = 100;
 const OFFSET_LEFT: i32 = 10;
 
+/// Color for a cloud-only cell — a save the server has but this device
+/// doesn't, distinct from the emulator colors.
+fn cloud_only_color() -> u32 {
+    rgba(0x55, 0x88, 0xaa, 0xff)
+}
+
 pub struct UITitles {
     pub top_row: i32,
     pub selected_idx: i32,
@@ -46,6 +52,10 @@ pub struct UITitles {
     /// Real `app_data.titles` indices not excluded from sync; grid position
     /// is the index into this Vec, not the real Titles index.
     visible_native: Vec<i32>,
+    /// `(title_id, name)` for saves the server has but this device doesn't —
+    /// recomputed from `sync_engine.games` once per `update()`, see
+    /// `refresh_cloud_only`.
+    cloud_only: Vec<(String, String)>,
     /// Set by `invalidate()`, which has no AppData to refresh with itself.
     needs_sync_refresh: bool,
     sync_engine: SyncEngine,
@@ -62,6 +72,7 @@ impl UITitles {
             emulator_entries: Vec::new(),
             emulators_loaded: false,
             visible_native: Vec::new(),
+            cloud_only: Vec::new(),
             needs_sync_refresh: false,
             sync_engine: SyncEngine::new(),
         }
@@ -70,14 +81,7 @@ impl UITitles {
     /// SyncGameInfo for the currently selected grid cell, if the background
     /// fetch has reached it yet.
     fn current_sync_game(&self, app_data: &AppData) -> Option<SyncGameInfo> {
-        let id = if self.selected_idx < self.native_count() {
-            self.native_title(app_data, self.selected_idx)?
-                .title_id()
-                .to_string()
-        } else {
-            let emu_idx = (self.selected_idx - self.native_count()) as usize;
-            self.emulator_entries.get(emu_idx)?.id.clone()
-        };
+        let id = self.grid_id(app_data, self.selected_idx)?;
         self.sync_engine
             .games
             .read()
@@ -87,6 +91,36 @@ impl UITitles {
             .cloned()
     }
 
+    /// The sync-status id a grid position corresponds to, across all three
+    /// cell kinds (native / emulator / cloud-only).
+    fn grid_id(&self, app_data: &AppData, idx: i32) -> Option<String> {
+        let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
+        if idx < native_count {
+            Some(self.native_title(app_data, idx)?.title_id().to_string())
+        } else if idx < emulator_end {
+            let emu_idx = (idx - native_count) as usize;
+            Some(self.emulator_entries.get(emu_idx)?.id.clone())
+        } else {
+            let cloud_idx = (idx - emulator_end) as usize;
+            Some(self.cloud_only.get(cloud_idx)?.0.clone())
+        }
+    }
+
+    /// Recomputes `cloud_only` from the current sync snapshot — a pure-cloud
+    /// entry has no grid cell otherwise.
+    fn refresh_cloud_only(&mut self) {
+        self.cloud_only = self
+            .sync_engine
+            .games
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|g| g.is_pure_cloud)
+            .map(|g| (g.title_id.clone(), g.name.clone()))
+            .collect();
+    }
+
     fn filter_excluded_emulators(entries: Vec<EmulatorEntry>, config: &Config) -> Vec<EmulatorEntry> {
         entries
             .into_iter()
@@ -94,9 +128,9 @@ impl UITitles {
             .collect()
     }
 
-    /// Rebuilds `emulator_entries` and `visible_native` against the current
-    /// exclusion config.
-    fn refresh_sync_filters(&mut self, app_data: &AppData) {
+    /// Rebuilds `emulator_entries`/`visible_native` from a fresh filesystem
+    /// scan and clears the icon cache — shared by both refresh paths below.
+    fn rescan_local_entries(&mut self, app_data: &AppData) {
         let config = Config::global();
         self.emulator_entries = Self::filter_excluded_emulators(scan_emulator_entries(), &config);
         self.visible_native = (0..app_data.titles.size() as i32)
@@ -110,7 +144,25 @@ impl UITitles {
             .collect();
         self.icons.clear();
         self.icon_bufs.write().unwrap().clear();
+    }
+
+    /// Rebuilds `emulator_entries` and `visible_native` against the current
+    /// exclusion config.
+    fn refresh_sync_filters(&mut self, app_data: &AppData) {
+        self.rescan_local_entries(app_data);
         self.sync_engine.games.write().unwrap().clear();
+        self.cloud_only.clear();
+        let total = self.total_size(app_data);
+        self.selected_idx = self.selected_idx.min((total - 1).max(0));
+    }
+
+    /// Redoes just the local filesystem scan after a download restores
+    /// something — unlike `refresh_sync_filters`, this leaves
+    /// `sync_engine.games` alone so it doesn't discard a status the download
+    /// just confirmed or trigger another network fetch.
+    fn refresh_local_scan(&mut self, app_data: &AppData) {
+        self.rescan_local_entries(app_data);
+        self.refresh_cloud_only();
         let total = self.total_size(app_data);
         self.selected_idx = self.selected_idx.min((total - 1).max(0));
     }
@@ -125,8 +177,14 @@ impl UITitles {
         app_data.titles.get_title_by_idx(real_idx)
     }
 
-    fn total_size(&self, _app_data: &AppData) -> i32 {
+    /// Grid index one past the last emulator cell — where the cloud-only
+    /// section starts.
+    fn emulator_end(&self) -> i32 {
         self.native_count() + self.emulator_entries.len() as i32
+    }
+
+    fn total_size(&self, _app_data: &AppData) -> i32 {
+        self.emulator_end() + self.cloud_only.len() as i32
     }
 
     fn update_selected(&mut self, app_data: &mut AppData, buttons: u32) {
@@ -297,6 +355,7 @@ impl UITitles {
 
     fn draw_selected_game_info(&self, app_data: &AppData) {
         let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
         let total = self.total_size(app_data);
         if total == 0 {
             return;
@@ -333,7 +392,7 @@ impl UITitles {
                     "No saves found"
                 },
             );
-        } else {
+        } else if self.selected_idx < emulator_end {
             let emu_idx = (self.selected_idx - native_count) as usize;
             if let Some(entry) = self.emulator_entries.get(emu_idx) {
                 vita2d_draw_text(
@@ -351,6 +410,24 @@ impl UITitles {
                     &entry.source_path,
                 );
             }
+        } else {
+            let cloud_idx = (self.selected_idx - emulator_end) as usize;
+            if let Some((_, name)) = self.cloud_only.get(cloud_idx) {
+                vita2d_draw_text(
+                    left,
+                    10 + vita2d_text_height(1.0, name),
+                    rgba(0xff, 0xff, 0xff, 0xff),
+                    1.0,
+                    name,
+                );
+                vita2d_draw_text(
+                    left,
+                    35 + vita2d_text_height(1.0, "Not on this device — press △ to download"),
+                    rgba(0xaa, 0xaa, 0xaa, 0xff),
+                    1.0,
+                    "Not on this device — press △ to download",
+                );
+            }
         }
 
         vita2d_draw_text(
@@ -362,13 +439,16 @@ impl UITitles {
         );
 
         // selected icon bg highlight — color depends on entry type
-        let highlight_color = if self.selected_idx >= native_count {
+        let highlight_color = if self.selected_idx < emulator_end && self.selected_idx >= native_count
+        {
             let emu_idx = (self.selected_idx - native_count) as usize;
             match self.emulator_entries.get(emu_idx).map(|e| &e.kind) {
                 Some(EmulatorKind::Psp) => rgba(0xff, 0x6b, 0x9d, 0xff),
                 Some(EmulatorKind::RetroArch) => rgba(0xff, 0x77, 0x00, 0xff),
                 None => get_active_color(),
             }
+        } else if self.selected_idx >= emulator_end {
+            cloud_only_color()
         } else {
             get_active_color()
         };
@@ -425,6 +505,7 @@ impl UITitles {
     pub fn draw_game_list(&self, app_data: &AppData) {
         let icon_bg = rgba(0x44, 0x44, 0x44, 0xff);
         let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
         let total = self.total_size(app_data);
         let start_idx = self.top_row * ICON_COL;
         let end_idx = (start_idx + ICON_COL * ICON_ROW).min(total);
@@ -462,7 +543,7 @@ impl UITitles {
                         Self::draw_sync_badge(x, y, cell_size, status, *checking);
                     }
                 }
-            } else {
+            } else if (icon_idx as i32) < emulator_end {
                 // emulator cell
                 let emu_idx = (icon_idx as i32 - native_count) as usize;
                 if let Some(entry) = self.emulator_entries.get(emu_idx) {
@@ -518,6 +599,33 @@ impl UITitles {
                         Self::draw_sync_badge(x, y, cell_size, status, *checking);
                     }
                 }
+            } else {
+                // cloud-only cell: on the server, not on this device yet
+                let cloud_idx = (icon_idx as i32 - emulator_end) as usize;
+                if let Some((id, _)) = self.cloud_only.get(cloud_idx) {
+                    let border = 2;
+                    vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, cloud_only_color());
+                    vita2d_draw_rect(
+                        (x + border) as f32,
+                        (y + border) as f32,
+                        (cell_size - border * 2) as f32,
+                        (cell_size - border * 2) as f32,
+                        rgba(0x22, 0x22, 0x22, 0xff),
+                    );
+                    let label = "Cloud";
+                    let lw = vita2d_text_width(1.0, label);
+                    let lh = vita2d_text_height(1.0, label);
+                    vita2d_draw_text(
+                        x + (cell_size - lw) / 2,
+                        y + (cell_size + lh) / 2,
+                        rgba(0xff, 0xff, 0xff, 0xff),
+                        1.0,
+                        label,
+                    );
+                    if let Some((status, checking)) = status_by_id.get(id.as_str()) {
+                        Self::draw_sync_badge(x, y, cell_size, status, *checking);
+                    }
+                }
             }
         }
     }
@@ -542,8 +650,18 @@ impl UIBase for UITitles {
         }
 
         self.sync_engine.pump();
+        if self
+            .sync_engine
+            .needs_local_rescan
+            .swap(false, Ordering::Relaxed)
+        {
+            self.refresh_local_scan(app_data);
+        } else {
+            self.refresh_cloud_only();
+        }
 
         let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
 
         // update icons texture (native titles only)
         UITitles::update_icons(self, app_data);
@@ -577,7 +695,7 @@ impl UIBase for UITitles {
                         if let Some(title) = title {
                             self.save_menu.open(title);
                         }
-                    } else {
+                    } else if self.selected_idx < emulator_end {
                         let emu_idx = (self.selected_idx - native_count) as usize;
                         if let Some(entry) = self.emulator_entries.get(emu_idx) {
                             let id = entry.id.clone();
@@ -594,6 +712,10 @@ impl UIBase for UITitles {
                                 ManageContext::Emulator(entry.clone()),
                             );
                         }
+                    } else {
+                        // Cloud-only cell: nothing local yet, so there's no
+                        // Manage screen content — △ is the one action.
+                        Toast::show("Not on this device yet — press △ to download.".to_string());
                     }
                 } else if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {
                     if let Some(game) = self.current_sync_game(app_data) {

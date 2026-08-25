@@ -45,7 +45,6 @@ pub struct SyncGameInfo {
     /// pure-cloud entries.
     pub real_id: Option<String>,
     pub status: SyncStatus,
-    pub local_time: Option<String>,
     pub cloud_time: Option<String>,
     pub cloud_size: Option<u64>,
     pub version_count: u64,
@@ -57,6 +56,9 @@ pub struct SyncGameInfo {
     /// must refuse until it clears. Always false for pure-cloud entries,
     /// which have no local data to verify.
     pub checking: bool,
+    /// True if the local scan never found this entry — server has it, this
+    /// device doesn't. Distinct from `has_local_backup` (backup existence).
+    pub is_pure_cloud: bool,
 }
 
 /// A local entry still queued for live-status verification in `fetch()`.
@@ -78,6 +80,10 @@ pub struct SyncEngine {
     /// fails. `games` is only trustworthy while this is true — badges and
     /// sync actions must not act on data we couldn't confirm is current.
     pub data_valid: Arc<AtomicBool>,
+    /// Set when a download restores a cloud-only entry's first local copy —
+    /// tells the screen's own filesystem scan to redo, since which grid
+    /// cell a title belongs in comes from that, not from `games`.
+    pub needs_local_rescan: Arc<AtomicBool>,
 }
 
 impl SyncEngine {
@@ -90,6 +96,7 @@ impl SyncEngine {
             fetch_at: Arc::new(RwLock::new(0)),
             pfs_mount: PfsMountHandshake::new(),
             data_valid: Arc::new(AtomicBool::new(false)),
+            needs_local_rescan: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -162,6 +169,10 @@ impl SyncEngine {
                 None
             };
 
+            // Loaded once and threaded through instead of re-reading this
+            // file from disk per entry (build_sync_info used to do that).
+            let local_manifest = LocalManifest::load();
+
             // Fast skeleton pass: every entry's status starts from cached,
             // mount-free data (the last local backup's hash) so the grid
             // paints immediately. Anything with live save data to verify is
@@ -184,7 +195,8 @@ impl SyncEngine {
                     &local_dir,
                     &manifest,
                     None,
-                    true,
+                    &local_manifest,
+                    false,
                 );
                 native_checks.push(CheckTarget::Native {
                     title_id: title_id.clone(),
@@ -210,7 +222,8 @@ impl SyncEngine {
                     &local_dir,
                     &manifest,
                     None,
-                    true,
+                    &local_manifest,
+                    false,
                 );
                 checks.push(CheckTarget::Emulator(entry.clone()));
                 info_list.push(info);
@@ -237,7 +250,8 @@ impl SyncEngine {
                             &local_dir,
                             &manifest,
                             None,
-                            false,
+                            &local_manifest,
+                            true,
                         );
                         info_list.push(info);
                     }
@@ -324,7 +338,7 @@ impl SyncEngine {
                     continue;
                 };
                 let cloud_data = manifest.as_ref().and_then(|m| m.games.get(&title_id));
-                let last_synced_hash = LocalManifest::load()
+                let last_synced_hash = local_manifest
                     .games
                     .get(&title_id)
                     .and_then(|e| e.last_synced_hash.clone());
@@ -400,7 +414,7 @@ impl SyncEngine {
         local_dir: &str,
         manifest: &Option<CloudManifest>,
     ) {
-        let (has_local, _local_time, local_content) = Self::scan_local_backup(local_dir);
+        let (has_local, local_content) = Self::scan_local_backup(local_dir);
         let cloud_data = manifest.as_ref().and_then(|m| m.games.get(title_id));
         let last_synced_hash = LocalManifest::load()
             .games
@@ -434,16 +448,27 @@ impl SyncEngine {
         local_dir: &str,
         manifest: &Option<CloudManifest>,
         live_hash: Option<String>,
-        checking: bool,
+        local_manifest: &LocalManifest,
+        // A pure-cloud entry's `local_dir` is a *backup* dir that can still
+        // hold an old zip from before the live save was deleted elsewhere —
+        // falling back to that stale hash (like the skeleton pass does for
+        // a still-detected entry) would never get corrected by a live
+        // check, since pure-cloud entries don't get one. Also sets
+        // `checking`: only a non-pure-cloud entry ever gets queued for one.
+        is_pure_cloud: bool,
     ) -> SyncGameInfo {
-        let (backup_exists, local_time, backup_content) = Self::scan_local_backup(local_dir);
-        let (has_local, local_content) = match live_hash {
-            Some(h) => (true, Some(h)),
-            None => (backup_exists, backup_content),
+        let (has_local, local_content) = if is_pure_cloud {
+            (false, None)
+        } else {
+            let (backup_exists, backup_content) = Self::scan_local_backup(local_dir);
+            match live_hash {
+                Some(h) => (true, Some(h)),
+                None => (backup_exists, backup_content),
+            }
         };
         let cloud_data = manifest.as_ref().and_then(|m| m.games.get(title_id));
 
-        let last_synced_hash = LocalManifest::load()
+        let last_synced_hash = local_manifest
             .games
             .get(title_id)
             .and_then(|e| e.last_synced_hash.clone());
@@ -462,21 +487,21 @@ impl SyncEngine {
             local_dir: local_dir.to_string(),
             real_id: real_id.map(str::to_string),
             status,
-            local_time,
             cloud_time: cloud_data.map(|c| c.latest_version.clone()),
             cloud_size: cloud_data.map(|c| c.size),
             version_count: cloud_data.map(|c| c.version_count).unwrap_or(0),
             has_local_backup: has_local,
-            checking,
+            checking: !is_pure_cloud,
+            is_pure_cloud,
         }
     }
 
-    /// Newest backup zip plus its content hash: (exists, newest mtime, newest
-    /// sidecar content hash). Zips from builds before sidecars return no hash.
-    fn scan_local_backup(local_dir: &str) -> (bool, Option<String>, Option<String>) {
+    /// Whether a local backup exists, plus the newest one's content-hash
+    /// sidecar. Zips from builds before sidecars return no hash.
+    fn scan_local_backup(local_dir: &str) -> (bool, Option<String>) {
         let path = Path::new(local_dir);
         if !path.exists() {
-            return (false, None, None);
+            return (false, None);
         }
         let mut latest: Option<(u64, String)> = None;
         if let Ok(entries) = path.read_dir() {
@@ -498,10 +523,9 @@ impl SyncEngine {
             }
         }
         let has = latest.is_some();
-        let ts = latest.as_ref().map(|(s, _)| format!("{}", s));
         let content = latest
             .and_then(|(_, name)| read_content_hash_sidecar(&format!("{}/{}", local_dir, name)));
-        (has, ts, content)
+        (has, content)
     }
 
     /// Upload a single game: create a local backup first if it doesn't have
@@ -585,6 +609,7 @@ impl SyncEngine {
         let pending = Arc::clone(&self.pending);
         let games = Arc::clone(&self.games);
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
+        let needs_local_rescan = Arc::clone(&self.needs_local_rescan);
 
         pending.store(true, Ordering::Relaxed);
         Loading::show();
@@ -598,6 +623,7 @@ impl SyncEngine {
                     match Self::restore_downloaded(&game, &dl_path, &pfs_mount, &cancel) {
                         Ok(true) => {
                             restore_ok = true;
+                            needs_local_rescan.store(true, Ordering::Relaxed);
                             Toast::show(format!("{} downloaded & restored.", n));
                         }
                         Ok(false) => {
@@ -726,6 +752,7 @@ impl SyncEngine {
         Loading::show();
         let cloud_manifest = Arc::clone(&self.cloud_manifest);
         let games_arc = Arc::clone(&self.games);
+        let needs_local_rescan = Arc::clone(&self.needs_local_rescan);
 
         tokio::spawn(async move {
             let config = Config::global();
@@ -823,7 +850,10 @@ impl SyncEngine {
                         // so recording the cloud hash would mark it in-sync
                         // when it isn't.
                         match Self::restore_downloaded(game, &dl_path, &pfs_mount, &cancel) {
-                            Ok(_) => {
+                            Ok(restored) => {
+                                if restored {
+                                    needs_local_rescan.store(true, Ordering::Relaxed);
+                                }
                                 downloaded.push((game.title_id.clone(), dl_path.clone()));
                             }
                             Err(e) => {
