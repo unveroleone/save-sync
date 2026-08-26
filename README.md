@@ -375,6 +375,7 @@ Upload sends `X-Save-Hash` (SHA-256), `X-Save-Timestamp`, and `X-Device-Id` head
 
 Forked from [Save Cloud Vita](https://github.com/save-cloud) by iamcco.
 Vita app uses [VitaShell](https://github.com/TheOfficialFloW/VitaShell) SQLite VFS and kernel modules, [vita-rust](https://github.com/vita-rust), [VitaSDK](https://github.com/vitasdk).
+PSX VMP signing ported from [apollo-psp](https://github.com/bucanero/apollo-psp)'s `vmp_resign.c`, cross-checked against [vita-mcr2vmp](https://github.com/dots-tb/vita-mcr2vmp)'s from-scratch header layout (both GPL-3.0).
 Save Sync Hub built with [Tauri v2](https://tauri.app) and [Svelte 5](https://svelte.dev).
 
 Built with the help of AI
