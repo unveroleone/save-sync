@@ -27,6 +27,12 @@ pub struct GameSyncEntry {
 pub struct LocalManifest {
     pub updated_at: String,
     pub games: HashMap<String, GameSyncEntry>,
+    /// `title_id -> display name` for every game the server reported in the
+    /// most recent successful fetch, regardless of whether this device has
+    /// ever synced it — lets a screen with no network access of its own
+    /// (Settings) still list a cloud-only save by name.
+    #[serde(default)]
+    pub cloud_titles: HashMap<String, String>,
 }
 
 impl LocalManifest {
@@ -45,6 +51,14 @@ impl LocalManifest {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = fs::write(LOCAL_MANIFEST_PATH, json);
         }
+    }
+
+    /// Replaces `cloud_titles` wholesale (not merged) so a game removed from
+    /// the server since the last fetch stops being listed as available.
+    pub fn record_cloud_titles(titles: HashMap<String, String>) {
+        let mut manifest = LocalManifest::load();
+        manifest.cloud_titles = titles;
+        manifest.save();
     }
 
     /// Mark a game as synced at the given content hash after a successful

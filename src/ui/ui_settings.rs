@@ -2,7 +2,9 @@ use crate::{
     api::Api,
     config::Config,
     constant::{SCREEN_HEIGHT, SCREEN_WIDTH},
+    emulator::{emulator_kind_from_entry_id, EmulatorKind},
     ime::show_keyboard,
+    sync::LocalManifest,
     ui::{list_state::ListState, ui_loading::Loading, ui_toast::Toast},
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_line, vita2d_text_height,
@@ -109,6 +111,22 @@ impl UISettings {
             match e.kind {
                 crate::emulator::EmulatorKind::Psp => self.psp_games.push((e.id, e.name)),
                 crate::emulator::EmulatorKind::RetroArch => self.retroarch_games.push((e.id, e.name)),
+            }
+        }
+        // Saves the server has that this device hasn't scanned locally
+        // wouldn't otherwise be listed at all — this screen has no network
+        // access of its own, so it relies on the Games tab's last fetch.
+        for (id, name) in LocalManifest::load().cloud_titles {
+            let known = self.native_games.iter().any(|(i, _)| i == &id)
+                || self.psp_games.iter().any(|(i, _)| i == &id)
+                || self.retroarch_games.iter().any(|(i, _)| i == &id);
+            if known {
+                continue;
+            }
+            match emulator_kind_from_entry_id(&id) {
+                None => self.native_games.push((id, name)),
+                Some(EmulatorKind::Psp) => self.psp_games.push((id, name)),
+                Some(EmulatorKind::RetroArch) => self.retroarch_games.push((id, name)),
             }
         }
         // Already-excluded categories start folded.

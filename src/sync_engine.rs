@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::Path,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -145,7 +146,25 @@ impl SyncEngine {
         tokio::spawn(async move {
             let manifest = if is_configured {
                 match Api::get_cloud_manifest(&config) {
-                    Ok(m) => Some(m),
+                    Ok(m) => {
+                        // Cache id -> title for every game the server knows
+                        // about, so Settings (no network access of its own)
+                        // can still list a cloud-only save by name.
+                        let titles: HashMap<String, String> = m
+                            .games
+                            .iter()
+                            .map(|(id, e)| {
+                                let name = e
+                                    .title
+                                    .clone()
+                                    .filter(|t| !t.is_empty())
+                                    .unwrap_or_else(|| id.clone());
+                                (id.clone(), name)
+                            })
+                            .collect();
+                        LocalManifest::record_cloud_titles(titles);
+                        Some(m)
+                    }
                     Err(e) => {
                         // A fetch failure (no network, server down, ...) is
                         // not the same as the server having no data. Acting
