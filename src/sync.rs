@@ -27,6 +27,12 @@ pub struct GameSyncEntry {
 pub struct LocalManifest {
     pub updated_at: String,
     pub games: HashMap<String, GameSyncEntry>,
+    /// `title_id -> display name` for every game the server reported in the
+    /// most recent successful fetch, regardless of whether this device has
+    /// ever synced it — lets a screen with no network access of its own
+    /// (Settings) still list a cloud-only save by name.
+    #[serde(default)]
+    pub cloud_titles: HashMap<String, String>,
 }
 
 impl LocalManifest {
@@ -47,6 +53,14 @@ impl LocalManifest {
         }
     }
 
+    /// Replaces `cloud_titles` wholesale (not merged) so a game removed from
+    /// the server since the last fetch stops being listed as available.
+    pub fn record_cloud_titles(titles: HashMap<String, String>) {
+        let mut manifest = LocalManifest::load();
+        manifest.cloud_titles = titles;
+        manifest.save();
+    }
+
     /// Mark a game as synced at the given content hash after a successful
     /// upload or download. Both sides are equal at that moment.
     pub fn record(title: &str, content_hash: &str) {
@@ -60,6 +74,32 @@ impl LocalManifest {
         entry.last_synced_hash = Some(content_hash.to_string());
         manifest.updated_at = crate::utils::current_time().to_string();
         manifest.save();
+    }
+}
+
+/// Sync status from raw backup presence + content hashes. Bridges the
+/// exists-only case (backups from before content hashes existed) to
+/// compute_status's hash-based comparison.
+pub fn status_for(
+    has_local: bool,
+    has_cloud: bool,
+    local_hash: Option<&str>,
+    cloud_hash: Option<&str>,
+    last_synced_hash: Option<&str>,
+) -> SyncStatus {
+    match (has_local, has_cloud) {
+        (false, false) => SyncStatus::LocalOnly,
+        (false, true) => SyncStatus::CloudOnly,
+        (true, false) => SyncStatus::LocalOnly,
+        (true, true) => match (local_hash, cloud_hash) {
+            (Some(local), Some(cloud)) => compute_status(&GameSyncEntry {
+                local_hash: Some(local.to_string()),
+                cloud_hash: Some(cloud.to_string()),
+                last_synced_hash: last_synced_hash.map(str::to_string),
+                ..Default::default()
+            }),
+            _ => SyncStatus::InSync,
+        },
     }
 }
 

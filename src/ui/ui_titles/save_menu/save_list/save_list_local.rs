@@ -16,7 +16,7 @@ use crate::{
     ime::{get_current_format_time, show_keyboard},
     tai::mount_pfs,
     ui::{
-        ui_cloud::list_state::ListState, ui_dialog::UIDialog, ui_list::UIList, ui_loading::Loading,
+        list_state::ListState, ui_dialog::UIDialog, ui_list::UIList, ui_loading::Loading,
         ui_scroll_progress::ScrollProgress, ui_toast::Toast,
     },
     utils::{
@@ -36,7 +36,6 @@ pub struct SaveListLocal {
     list_state: ListState,
     local_dir: String,
     title_id: String,
-    title_name: String,
     /// Title sent to the server so backups there are labelled with the game name.
     server_title: String,
     needs_pfs: bool,
@@ -60,7 +59,6 @@ impl SaveListLocal {
             pending: Arc::new(AtomicBool::new(false)),
             local_dir: get_game_local_backup_dir(title_id, title_name),
             title_id: title_id.to_string(),
-            title_name: title_name.to_string(),
             server_title: server_title.to_string(),
             needs_pfs,
             items: Arc::new(RwLock::new(vec![])),

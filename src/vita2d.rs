@@ -30,9 +30,7 @@ extern "C" {
     fn v2d_init();
     fn v2d_exit();
     fn v2d_free_texture(data: *mut c_void);
-    fn v2d_load_png(path: *const c_char) -> *mut c_void;
     fn v2d_load_png_buf(buf: *const c_void) -> *mut c_void;
-    fn v2d_load_jpg(path: *const c_char) -> *mut c_void;
     fn v2d_load_jpg_buf(buf: *const c_void, size: c_ulong) -> *mut c_void;
     fn v2d_color(r: c_int, g: c_int, b: c_int, a: c_int) -> c_uint;
     fn v2d_draw_texture(texture: *const c_void, x: c_float, y: c_float);
@@ -57,10 +55,11 @@ extern "C" {
     fn vita2d_wait_rendering_done();
     fn vita2d_draw_rectangle(x: c_float, y: c_float, w: c_float, h: c_float, color: c_uint);
     fn vita2d_draw_line(x0: c_float, y0: c_float, x1: c_float, y1: c_float, color: c_uint);
-    fn vita2d_set_blend_mode_add(enable: c_int);
     fn vita2d_enable_clipping();
     fn vita2d_disable_clipping();
     fn vita2d_set_clip_rectangle(x_min: c_int, y_min: c_int, x_max: c_int, y_max: c_int);
+    fn vita2d_texture_get_width(texture: *const c_void) -> c_uint;
+    fn vita2d_texture_get_height(texture: *const c_void) -> c_uint;
 }
 
 pub struct Vita2dTexture {
@@ -70,6 +69,14 @@ pub struct Vita2dTexture {
 impl Vita2dTexture {
     pub fn new(tex: *mut c_void) -> Vita2dTexture {
         Vita2dTexture { tex }
+    }
+
+    pub fn width(&self) -> u32 {
+        unsafe { vita2d_texture_get_width(self.tex) }
+    }
+
+    pub fn height(&self) -> u32 {
+        unsafe { vita2d_texture_get_height(self.tex) }
     }
 }
 
@@ -117,28 +124,10 @@ pub fn vita2d_present() {
     }
 }
 
-pub fn vita2d_load_png_file(path: &str) -> Vita2dTexture {
-    unsafe {
-        let c_str = str_to_c_str(path);
-        Vita2dTexture {
-            tex: v2d_load_png(c_str.as_slice().as_ptr() as *const i8),
-        }
-    }
-}
-
 pub fn vita2d_load_png_buf(buf: &[u8]) -> Vita2dTexture {
     unsafe {
         Vita2dTexture {
             tex: v2d_load_png_buf(buf.as_ptr() as *const c_void),
-        }
-    }
-}
-
-pub fn vita2d_load_jpg_file(path: &str) -> Vita2dTexture {
-    unsafe {
-        let c_str = str_to_c_str(path);
-        Vita2dTexture {
-            tex: v2d_load_jpg(c_str.as_slice().as_ptr() as *const i8),
         }
     }
 }
@@ -213,14 +202,6 @@ pub fn vita2d_line(x0: f32, y0: f32, x1: f32, y1: f32, color: u32) {
     unsafe {
         vita2d_draw_line(x0, y0, x1, y1, color);
     }
-}
-
-pub fn vita2d_enable_blend_mode() {
-    unsafe { vita2d_set_blend_mode_add(1) }
-}
-
-pub fn vita2d_disable_blend_mode() {
-    unsafe { vita2d_set_blend_mode_add(0) }
 }
 
 pub fn vita2d_ctrl_peek_positive() -> u32 {

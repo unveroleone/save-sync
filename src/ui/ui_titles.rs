@@ -2,15 +2,19 @@ use std::{
     collections::HashMap,
     fs,
     path::Path,
-    sync::{Arc, RwLock},
+    sync::{atomic::Ordering, Arc, RwLock},
 };
 
 use log::error;
 
 use crate::{
     app::AppData,
+    config::Config,
     constant::{ABOUT_TEXT, GAME_CARD_SAVE_DIR, GAME_SAVE_DIR},
     emulator::{scan_emulator_entries, EmulatorEntry, EmulatorKind},
+    sync::SyncStatus,
+    sync_engine::{SyncEngine, SyncGameInfo},
+    tai::Title,
     utils::get_active_color,
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_draw_texture_scale,
@@ -19,11 +23,10 @@ use crate::{
     },
 };
 
-use self::{game_menu::GameMenu, save_menu::SaveMenu};
+use self::save_menu::{save_list::save_list_manage::ManageContext, SaveMenu};
 
-use super::{ui_base::UIBase, ui_dialog::UIDialog};
+use super::{ui_base::UIBase, ui_dialog::UIDialog, ui_loading::Loading, ui_toast::Toast};
 
-pub mod game_menu;
 pub mod save_menu;
 
 const ICON_SIZE: i32 = 94;
@@ -32,15 +35,30 @@ const ICON_ROW: i32 = 4;
 const OFFSET_TOP: i32 = 100;
 const OFFSET_LEFT: i32 = 10;
 
+/// Color for a cloud-only cell — a save the server has but this device
+/// doesn't, distinct from the emulator colors.
+fn cloud_only_color() -> u32 {
+    rgba(0x55, 0x88, 0xaa, 0xff)
+}
+
 pub struct UITitles {
     pub top_row: i32,
     pub selected_idx: i32,
     pub icons: HashMap<u32, Vita2dTexture>,
     pub icon_bufs: Arc<RwLock<HashMap<u32, Option<Vec<u8>>>>>,
     save_menu: SaveMenu,
-    game_menu: GameMenu,
     emulator_entries: Vec<EmulatorEntry>,
     emulators_loaded: bool,
+    /// Real `app_data.titles` indices not excluded from sync; grid position
+    /// is the index into this Vec, not the real Titles index.
+    visible_native: Vec<i32>,
+    /// `(title_id, name)` for saves the server has but this device doesn't —
+    /// recomputed from `sync_engine.games` once per `update()`, see
+    /// `refresh_cloud_only`.
+    cloud_only: Vec<(String, String)>,
+    /// Set by `invalidate()`, which has no AppData to refresh with itself.
+    needs_sync_refresh: bool,
+    sync_engine: SyncEngine,
 }
 
 impl UITitles {
@@ -51,14 +69,122 @@ impl UITitles {
             icons: HashMap::new(),
             icon_bufs: Arc::new(RwLock::new(HashMap::new())),
             save_menu: SaveMenu::new(),
-            game_menu: GameMenu::new(),
             emulator_entries: Vec::new(),
             emulators_loaded: false,
+            visible_native: Vec::new(),
+            cloud_only: Vec::new(),
+            needs_sync_refresh: false,
+            sync_engine: SyncEngine::new(),
         }
     }
 
-    fn total_size(&self, app_data: &AppData) -> i32 {
-        app_data.titles.size() as i32 + self.emulator_entries.len() as i32
+    /// SyncGameInfo for the currently selected grid cell, if the background
+    /// fetch has reached it yet.
+    fn current_sync_game(&self, app_data: &AppData) -> Option<SyncGameInfo> {
+        let id = self.grid_id(app_data, self.selected_idx)?;
+        self.sync_engine
+            .games
+            .read()
+            .unwrap()
+            .iter()
+            .find(|g| g.title_id == id)
+            .cloned()
+    }
+
+    /// The sync-status id a grid position corresponds to, across all three
+    /// cell kinds (native / emulator / cloud-only).
+    fn grid_id(&self, app_data: &AppData, idx: i32) -> Option<String> {
+        let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
+        if idx < native_count {
+            Some(self.native_title(app_data, idx)?.title_id().to_string())
+        } else if idx < emulator_end {
+            let emu_idx = (idx - native_count) as usize;
+            Some(self.emulator_entries.get(emu_idx)?.id.clone())
+        } else {
+            let cloud_idx = (idx - emulator_end) as usize;
+            Some(self.cloud_only.get(cloud_idx)?.0.clone())
+        }
+    }
+
+    /// Recomputes `cloud_only` from the current sync snapshot — a pure-cloud
+    /// entry has no grid cell otherwise.
+    fn refresh_cloud_only(&mut self) {
+        self.cloud_only = self
+            .sync_engine
+            .games
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|g| g.is_pure_cloud)
+            .map(|g| (g.title_id.clone(), g.name.clone()))
+            .collect();
+    }
+
+    fn filter_excluded_emulators(entries: Vec<EmulatorEntry>, config: &Config) -> Vec<EmulatorEntry> {
+        entries
+            .into_iter()
+            .filter(|e| !config.is_effectively_excluded(&e.id, Some(e.kind)))
+            .collect()
+    }
+
+    /// Rebuilds `emulator_entries`/`visible_native` from a fresh filesystem
+    /// scan and clears the icon cache — shared by both refresh paths below.
+    fn rescan_local_entries(&mut self, app_data: &AppData) {
+        let config = Config::global();
+        self.emulator_entries = Self::filter_excluded_emulators(scan_emulator_entries(), &config);
+        self.visible_native = (0..app_data.titles.size() as i32)
+            .filter(|&i| {
+                app_data
+                    .titles
+                    .get_title_by_idx(i)
+                    .map(|t| !config.is_effectively_excluded(t.title_id(), None))
+                    .unwrap_or(false)
+            })
+            .collect();
+        self.icons.clear();
+        self.icon_bufs.write().unwrap().clear();
+    }
+
+    /// Rebuilds `emulator_entries` and `visible_native` against the current
+    /// exclusion config.
+    fn refresh_sync_filters(&mut self, app_data: &AppData) {
+        self.rescan_local_entries(app_data);
+        self.sync_engine.games.write().unwrap().clear();
+        self.cloud_only.clear();
+        let total = self.total_size(app_data);
+        self.selected_idx = self.selected_idx.min((total - 1).max(0));
+    }
+
+    /// Redoes just the local filesystem scan after a download restores
+    /// something — unlike `refresh_sync_filters`, this leaves
+    /// `sync_engine.games` alone so it doesn't discard a status the download
+    /// just confirmed or trigger another network fetch.
+    fn refresh_local_scan(&mut self, app_data: &AppData) {
+        self.rescan_local_entries(app_data);
+        self.refresh_cloud_only();
+        let total = self.total_size(app_data);
+        self.selected_idx = self.selected_idx.min((total - 1).max(0));
+    }
+
+    fn native_count(&self) -> i32 {
+        self.visible_native.len() as i32
+    }
+
+    /// Native title at grid position `visible_idx` (not a real Titles index).
+    fn native_title<'a>(&self, app_data: &'a AppData, visible_idx: i32) -> Option<&'a Title> {
+        let real_idx = *self.visible_native.get(visible_idx as usize)?;
+        app_data.titles.get_title_by_idx(real_idx)
+    }
+
+    /// Grid index one past the last emulator cell — where the cloud-only
+    /// section starts.
+    fn emulator_end(&self) -> i32 {
+        self.native_count() + self.emulator_entries.len() as i32
+    }
+
+    fn total_size(&self, _app_data: &AppData) -> i32 {
+        self.emulator_end() + self.cloud_only.len() as i32
     }
 
     fn update_selected(&mut self, app_data: &mut AppData, buttons: u32) {
@@ -123,15 +249,18 @@ impl UITitles {
     }
 
     fn update_icons(&mut self, app_data: &mut AppData) {
-        let native_count = app_data.titles.size() as i32;
+        let native_count = self.native_count();
         let total = self.total_size(app_data);
         let start_idx = (self.top_row - 1) * ICON_COL;
         let start_idx = if start_idx < 0 { 0 } else { start_idx };
         let end_idx = start_idx + ICON_COL * (ICON_ROW + 2);
         let end_idx = if end_idx < total { end_idx } else { total };
 
-        // load native title icons
-        for (idx, title) in app_data.titles.iter().enumerate() {
+        // load native title icons (grid position, not the real Titles index)
+        for idx in 0..self.visible_native.len() {
+            let Some(title) = self.native_title(app_data, idx as i32) else {
+                continue;
+            };
             if idx >= start_idx as usize && idx < end_idx as usize {
                 let key = idx as u32;
                 let has_icon = self.icons.contains_key(&key);
@@ -153,7 +282,9 @@ impl UITitles {
 
                     let iconpath = title.iconpath().to_string();
                     let icon_bufs = Arc::clone(&self.icon_bufs);
-                    tokio::spawn(async move {
+                    // spawn_blocking: a plain fs::read would otherwise tie up
+                    // one of the few async worker threads for its duration.
+                    tokio::task::spawn_blocking(move || {
                         if Path::new(&iconpath).exists() {
                             match fs::read(&iconpath) {
                                 Ok(file) => {
@@ -201,7 +332,7 @@ impl UITitles {
 
                         let path = icon_path.clone();
                         let icon_bufs = Arc::clone(&self.icon_bufs);
-                        tokio::spawn(async move {
+                        tokio::task::spawn_blocking(move || {
                             if Path::new(&path).exists() {
                                 match fs::read(&path) {
                                     Ok(file) => {
@@ -223,7 +354,8 @@ impl UITitles {
     }
 
     fn draw_selected_game_info(&self, app_data: &AppData) {
-        let native_count = app_data.titles.size() as i32;
+        let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
         let total = self.total_size(app_data);
         if total == 0 {
             return;
@@ -233,10 +365,9 @@ impl UITitles {
         let num = format!("→ {}/{}", self.selected_idx + 1, total);
 
         if self.selected_idx < native_count {
-            let titles = &app_data.titles;
-            let title = titles
-                .get_title_by_idx(self.selected_idx)
-                .expect("get title by idx");
+            let Some(title) = self.native_title(app_data, self.selected_idx) else {
+                return;
+            };
             let real_id = title.real_id();
             let header = format!("{}  |  {}", title.title_id(), title.name());
             let mut save_path = format!("{}/{}", GAME_CARD_SAVE_DIR, real_id);
@@ -261,7 +392,7 @@ impl UITitles {
                     "No saves found"
                 },
             );
-        } else {
+        } else if self.selected_idx < emulator_end {
             let emu_idx = (self.selected_idx - native_count) as usize;
             if let Some(entry) = self.emulator_entries.get(emu_idx) {
                 vita2d_draw_text(
@@ -279,6 +410,24 @@ impl UITitles {
                     &entry.source_path,
                 );
             }
+        } else {
+            let cloud_idx = (self.selected_idx - emulator_end) as usize;
+            if let Some((_, name)) = self.cloud_only.get(cloud_idx) {
+                vita2d_draw_text(
+                    left,
+                    10 + vita2d_text_height(1.0, name),
+                    rgba(0xff, 0xff, 0xff, 0xff),
+                    1.0,
+                    name,
+                );
+                vita2d_draw_text(
+                    left,
+                    35 + vita2d_text_height(1.0, "Not on this device — press △ to download"),
+                    rgba(0xaa, 0xaa, 0xaa, 0xff),
+                    1.0,
+                    "Not on this device — press △ to download",
+                );
+            }
         }
 
         vita2d_draw_text(
@@ -290,13 +439,16 @@ impl UITitles {
         );
 
         // selected icon bg highlight — color depends on entry type
-        let highlight_color = if self.selected_idx >= native_count {
+        let highlight_color = if self.selected_idx < emulator_end && self.selected_idx >= native_count
+        {
             let emu_idx = (self.selected_idx - native_count) as usize;
             match self.emulator_entries.get(emu_idx).map(|e| &e.kind) {
                 Some(EmulatorKind::Psp) => rgba(0xff, 0x6b, 0x9d, 0xff),
                 Some(EmulatorKind::RetroArch) => rgba(0xff, 0x77, 0x00, 0xff),
                 None => get_active_color(),
             }
+        } else if self.selected_idx >= emulator_end {
+            cloud_only_color()
         } else {
             get_active_color()
         };
@@ -311,12 +463,57 @@ impl UITitles {
         );
     }
 
+    /// Colored badge in a cell's corner, word-wrapped onto up to 2 short
+    /// lines so it reads on sight without a legend, even in an 86px cell.
+    fn draw_sync_badge(x: i32, y: i32, cell_size: i32, status: &SyncStatus, checking: bool) {
+        let lines: &[&str] = if checking {
+            &["Checking"]
+        } else {
+            match status {
+                SyncStatus::InSync => &["Synced"],
+                SyncStatus::UploadNeeded | SyncStatus::LocalOnly => &["Upload", "Needed"],
+                SyncStatus::DownloadAvailable | SyncStatus::CloudOnly => &["Download", "Needed"],
+                SyncStatus::Conflict => &["Conflict"],
+            }
+        };
+        let scale = 0.9;
+        let metrics: Vec<(i32, i32)> = lines
+            .iter()
+            .map(|l| (vita2d_text_width(scale, l), vita2d_text_height(scale, l)))
+            .collect();
+        let bw = metrics.iter().map(|(w, _)| *w).max().unwrap_or(0) + 6;
+        let bh: i32 = metrics.iter().map(|(_, h)| h + 2).sum::<i32>() + 2;
+        let bx = x + cell_size - bw;
+        let by = y;
+        // Translucent so the icon underneath still shows through. Neutral
+        // gray while checking so it never flashes a status color that's
+        // about to be overwritten.
+        let badge_color = if checking {
+            rgba(0x77, 0x77, 0x77, 0xd0)
+        } else {
+            SyncEngine::status_color_alpha(status, 0xd0)
+        };
+        vita2d_draw_rect(bx as f32, by as f32, bw as f32, bh as f32, badge_color);
+        let mut cursor_y = by + 1;
+        for (line, (w, h)) in lines.iter().zip(metrics.iter()) {
+            cursor_y += h;
+            vita2d_draw_text(bx + (bw - w) / 2, cursor_y, rgba(0xff, 0xff, 0xff, 0xff), scale, line);
+            cursor_y += 2;
+        }
+    }
+
     pub fn draw_game_list(&self, app_data: &AppData) {
         let icon_bg = rgba(0x44, 0x44, 0x44, 0xff);
-        let native_count = app_data.titles.size() as i32;
+        let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
         let total = self.total_size(app_data);
         let start_idx = self.top_row * ICON_COL;
         let end_idx = (start_idx + ICON_COL * ICON_ROW).min(total);
+        let sync_games = self.sync_engine.games.read().unwrap();
+        let status_by_id: HashMap<&str, (&SyncStatus, bool)> = sync_games
+            .iter()
+            .map(|g| (g.title_id.as_str(), (&g.status, g.checking)))
+            .collect();
 
         for idx in 0..(ICON_COL * ICON_ROW) as i32 {
             if start_idx + idx >= end_idx {
@@ -341,7 +538,12 @@ impl UITitles {
                         cell_size as f32 / 128.0,
                     );
                 }
-            } else {
+                if let Some(title) = self.native_title(app_data, icon_idx as i32) {
+                    if let Some((status, checking)) = status_by_id.get(title.title_id()) {
+                        Self::draw_sync_badge(x, y, cell_size, status, *checking);
+                    }
+                }
+            } else if (icon_idx as i32) < emulator_end {
                 // emulator cell
                 let emu_idx = (icon_idx as i32 - native_count) as usize;
                 if let Some(entry) = self.emulator_entries.get(emu_idx) {
@@ -352,14 +554,18 @@ impl UITitles {
                     let border = 2;
                     let has_icon = self.icons.contains_key(&icon_idx);
                     if has_icon {
-                        // PSP ICON0.PNG is 144x80 (16:9). Scale to fill height, center-crop width.
+                        // ICON0.PNG aspect ratio varies by platform (PSP is
+                        // 144x80, PS1 is 80x80 under Adrenaline). Scale to
+                        // fill the cell height using the texture's real size,
+                        // then center-crop width so any ratio lands centered.
                         vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, icon_bg);
-                        let scale = cell_size as f32 / 80.0;
-                        let draw_w = (144.0 * scale) as i32;
+                        let texture = self.icons.get(&icon_idx).expect("emu icon");
+                        let scale = cell_size as f32 / texture.height() as f32;
+                        let draw_w = (texture.width() as f32 * scale) as i32;
                         let x_draw = x - (draw_w - cell_size) / 2;
                         vita2d_set_clip(x, y, x + cell_size, y + cell_size);
                         vita2d_draw_texture_scale(
-                            self.icons.get(&icon_idx).expect("emu icon"),
+                            texture,
                             x_draw as f32,
                             y as f32,
                             scale,
@@ -389,6 +595,36 @@ impl UITitles {
                             label,
                         );
                     }
+                    if let Some((status, checking)) = status_by_id.get(entry.id.as_str()) {
+                        Self::draw_sync_badge(x, y, cell_size, status, *checking);
+                    }
+                }
+            } else {
+                // cloud-only cell: on the server, not on this device yet
+                let cloud_idx = (icon_idx as i32 - emulator_end) as usize;
+                if let Some((id, _)) = self.cloud_only.get(cloud_idx) {
+                    let border = 2;
+                    vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, cloud_only_color());
+                    vita2d_draw_rect(
+                        (x + border) as f32,
+                        (y + border) as f32,
+                        (cell_size - border * 2) as f32,
+                        (cell_size - border * 2) as f32,
+                        rgba(0x22, 0x22, 0x22, 0xff),
+                    );
+                    let label = "Cloud";
+                    let lw = vita2d_text_width(1.0, label);
+                    let lh = vita2d_text_height(1.0, label);
+                    vita2d_draw_text(
+                        x + (cell_size - lw) / 2,
+                        y + (cell_size + lh) / 2,
+                        rgba(0xff, 0xff, 0xff, 0xff),
+                        1.0,
+                        label,
+                    );
+                    if let Some((status, checking)) = status_by_id.get(id.as_str()) {
+                        Self::draw_sync_badge(x, y, cell_size, status, *checking);
+                    }
                 }
             }
         }
@@ -398,57 +634,68 @@ impl UITitles {
         if self.save_menu.is_active() {
             self.save_menu.draw();
         }
-
-        if self.game_menu.is_active() {
-            self.game_menu.draw();
-        }
     }
 }
 
 impl UIBase for UITitles {
     fn update(&mut self, app_data: &mut AppData, buttons: u32) {
-        // load emulator entries once on first update
         if !self.emulators_loaded {
-            self.emulator_entries = scan_emulator_entries();
+            self.refresh_sync_filters(app_data);
             self.emulators_loaded = true;
         }
 
-        let native_count = app_data.titles.size() as i32;
+        if self.needs_sync_refresh {
+            self.refresh_sync_filters(app_data);
+            self.needs_sync_refresh = false;
+        }
+
+        self.sync_engine.pump();
+        if self
+            .sync_engine
+            .needs_local_rescan
+            .swap(false, Ordering::Relaxed)
+        {
+            self.refresh_local_scan(app_data);
+        } else {
+            self.refresh_cloud_only();
+        }
+
+        let native_count = self.native_count();
+        let emulator_end = self.emulator_end();
 
         // update icons texture (native titles only)
         UITitles::update_icons(self, app_data);
 
         if self.save_menu.is_forces() {
             self.save_menu.update(buttons);
-        } else if self.game_menu.is_forces() {
-            if self.selected_idx < native_count {
-                self.game_menu.update(
-                    buttons,
-                    app_data.titles.get_title_by_idx(self.selected_idx),
-                    &app_data.titles,
-                    None,
-                );
-            } else {
-                let emu_idx = (self.selected_idx - native_count) as usize;
-                self.game_menu.update(
-                    buttons,
-                    None,
-                    &app_data.titles,
-                    self.emulator_entries.get(emu_idx),
-                );
+            if self.save_menu.take_sync_exclusion_changed() {
+                self.refresh_sync_filters(app_data);
+            }
+            if let Some(title_id) = self.save_menu.take_needs_single_refresh() {
+                self.sync_engine.refresh_one(&title_id);
+            }
+        } else if self.sync_engine.pending.load(Ordering::Relaxed) {
+            // Sync (single or all) holds all input, so circle is free to
+            // mean "stop". No confirmation dialog: it would block the main
+            // loop mid-run.
+            if is_button(buttons, SceCtrlButtons::SceCtrlCircle)
+                && !self.sync_engine.cancel.swap(true, Ordering::Relaxed)
+            {
+                Toast::show("Stopping after this game...".to_string());
+            }
+            if !Loading::is_pending() {
+                self.sync_engine.pending.store(false, Ordering::Relaxed);
             }
         } else {
             let total = self.total_size(app_data);
             if total > 0 {
                 if is_button(buttons, SceCtrlButtons::SceCtrlCross) {
                     if self.selected_idx < native_count {
-                        self.save_menu.open(
-                            app_data
-                                .titles
-                                .get_title_by_idx(self.selected_idx)
-                                .expect("selected title"),
-                        );
-                    } else {
+                        let title = self.native_title(app_data, self.selected_idx);
+                        if let Some(title) = title {
+                            self.save_menu.open(title);
+                        }
+                    } else if self.selected_idx < emulator_end {
                         let emu_idx = (self.selected_idx - native_count) as usize;
                         if let Some(entry) = self.emulator_entries.get(emu_idx) {
                             let id = entry.id.clone();
@@ -462,36 +709,44 @@ impl UIBase for UITitles {
                                 &server_title,
                                 Some(entry.save_target_excluding(&exclusions)),
                                 false,
+                                ManageContext::Emulator(entry.clone()),
                             );
                         }
+                    } else {
+                        // Cloud-only cell: nothing local yet, so there's no
+                        // Manage screen content — △ is the one action.
+                        Toast::show("Not on this device yet — press △ to download.".to_string());
                     }
                 } else if is_button(buttons, SceCtrlButtons::SceCtrlTriangle) {
-                    if self.selected_idx < native_count {
-                        self.game_menu.open();
+                    if let Some(game) = self.current_sync_game(app_data) {
+                        self.sync_engine.per_game_action(&game);
                     } else {
-                        let emu_idx = (self.selected_idx - native_count) as usize;
-                        if let Some(entry) = self.emulator_entries.get(emu_idx) {
-                            self.game_menu.open_emulator(entry);
-                        }
+                        Toast::show("Sync status not loaded yet.".to_string());
                     }
                 }
             }
             if is_button(buttons, SceCtrlButtons::SceCtrlSquare) {
-                UIDialog::present_about(ABOUT_TEXT);
+                UIDialog::present(ABOUT_TEXT);
+            }
+            if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
+                self.sync_engine.sync_all();
             }
             if is_button(buttons, SceCtrlButtons::SceCtrlSelect) {
-                self.emulator_entries = scan_emulator_entries();
-                self.icons.clear();
-                self.icon_bufs.write().unwrap().clear();
+                self.refresh_sync_filters(app_data);
             }
             UITitles::update_selected(self, app_data, buttons);
         }
 
+        // Background sync-status fetch. Non-blocking: the grid itself never
+        // waits on it, badges just pop in once it lands.
+        if self.sync_engine.games.read().unwrap().is_empty()
+            && !self.sync_engine.pending.load(Ordering::Relaxed)
+        {
+            self.sync_engine.fetch(&app_data.titles);
+        }
+
         if !self.save_menu.is_active() {
             self.save_menu.free_list();
-        }
-        if !self.game_menu.is_active() {
-            self.game_menu.free();
         }
     }
 
@@ -505,6 +760,10 @@ impl UIBase for UITitles {
     }
 
     fn is_forces(&self) -> bool {
-        self.save_menu.is_forces() || self.game_menu.is_forces()
+        self.save_menu.is_forces() || self.sync_engine.pending.load(Ordering::Relaxed)
+    }
+
+    fn invalidate(&mut self) {
+        self.needs_sync_refresh = true;
     }
 }
