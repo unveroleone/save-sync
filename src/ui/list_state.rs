@@ -29,7 +29,11 @@ impl ListState {
         } else if self.selected_idx >= size {
             self.selected_idx = 0;
         }
-        // top_row scope check
+        self.sync_top_row();
+    }
+
+    /// Keep `top_row` tracking `selected_idx`. Shared by `do_scroll`/`jump_to`.
+    fn sync_top_row(&mut self) {
         if self.selected_idx < self.top_row {
             self.top_row = self.selected_idx;
         } else if self.selected_idx - self.top_row >= self.display_row {
@@ -56,5 +60,11 @@ impl ListState {
     pub fn reset(&mut self) {
         self.top_row = 0;
         self.selected_idx = 0;
+    }
+
+    /// Jump straight to `idx` (e.g. a page step) instead of one row at a time.
+    pub fn jump_to(&mut self, idx: i32, size: i32) {
+        self.selected_idx = idx.clamp(0, (size - 1).max(0));
+        self.sync_top_row();
     }
 }

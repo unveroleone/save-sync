@@ -123,8 +123,4 @@ impl UIDialog {
     pub fn present(text: &str) -> bool {
         UIDialog::draw(text)
     }
-
-    pub fn present_about(text: &str) -> bool {
-        UIDialog::draw(text)
-    }
 }

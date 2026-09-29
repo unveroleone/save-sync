@@ -3,10 +3,7 @@ use std::time::Instant;
 use crate::{
     constant::{BUTTON_HOLDING_DELAY, BUTTON_HOLDING_REPEAT_DELAY},
     tai::{psv_prevent_sleep, unmount_pfs, Titles},
-    ui::{
-        ui_base::UIBase, ui_cloud::UICloud, ui_desktop::UIDesktop, ui_loading::Loading,
-        ui_titles::UITitles, ui_toast::Toast,
-    },
+    ui::{ui_base::UIBase, ui_desktop::UIDesktop, ui_loading::Loading, ui_titles::UITitles, ui_toast::Toast},
     utils::current_time,
     vita2d::{
         is_button, vita2d_ctrl_peek_positive, vita2d_drawing, vita2d_present, SceCtrlButtons,
@@ -32,15 +29,8 @@ impl App {
     pub fn new(titles: Titles) -> Self {
         App {
             data: AppData::new(titles),
-            uis: vec![Box::new(UIDesktop::new([
-                Box::new(UITitles::new()),
-                Box::new(UICloud::new()),
-            ]))],
+            uis: vec![Box::new(UIDesktop::new(Box::new(UITitles::new())))],
         }
-    }
-
-    pub fn add_ui(&mut self, ui: Box<dyn UIBase>) {
-        self.uis.push(ui);
     }
 
     pub fn update(&mut self, buttons: u32) -> bool {

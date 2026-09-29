@@ -23,8 +23,6 @@ pub const PSV_DEVICES: [&str; 11] = [
     "ux0:", "uma0:", "grw0:", "os0:", "pd0:", "sa0:", "tm0:", "ud0:", "ur0:", "vd0:", "vs0:",
 ];
 
-// app data root (replaces ux0:data/save-cloud)
-pub const SAVE_CLOUD_DIR: &str = "ux0:data/save-sync";
 // local backup archive directory (replaces ux0:data/save-cloud/saves)
 pub const GAME_SAVE_LOCAL_DIR: &str = "ux0:data/save-sync/backups";
 // config and manifest
@@ -50,26 +48,21 @@ pub const TEXT_R: &str = "-> R";
 
 // desktop bottom bar
 pub const DESKTOP_BOTTOM_BAR_TEXT: &str =
-    "(START) Exit    (□) About    (△) Menu    (X) Saves    (SEL) Refresh";
-pub const DESKTOP_BOTTOM_BAR_CLOUD_TEXT: &str =
-    "(START) Exit  (X) Action  (□) Sync All  (△) Settings  (SEL) Refresh";
+    "(START) Exit    (X) Manage    (△) Sync    (□) About    (〇) Sync All    (SEL) Refresh";
+pub const DESKTOP_BOTTOM_BAR_SETTINGS_TEXT: &str = "(X) Edit    (〇) Back";
 
 // save drawer (local tab)
 pub const SAVE_DRAWER_BOTTOM_BAR_TEXT: &str =
     "(SEL)Up  (□)Restore  (△)Del  (〇)Close  (X)Sel";
-// save drawer (cloud/server tab)
-pub const SAVE_DRAWER_CLOUD_BOTTOM_BAR_TEXT: &str =
-    "(□) Restore  (△) Delete  (〇) Close  (X) Select";
-pub const ACTION_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
-pub const TITLE_DRAWER_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
-// PSP folder picker (game menu)
+// save drawer (manage tab)
+pub const SAVE_DRAWER_MANAGE_BOTTOM_BAR_TEXT: &str = "(〇) Close    (X) Select";
+// PSP folder picker (manage tab)
 pub const FOLDER_PICKER_BOTTOM_BAR_TEXT: &str = "(X) Toggle    (〇) Save";
 
 // save menu tabs
 pub const TAB_LOCAL: &str = "Local Backup";
-pub const TAB_CLOUD: &str = "Server Backup";
+pub const TAB_MANAGE: &str = "Manage";
 pub const NEW_BACKUP: &str = "New Backup";
-pub const NEW_CLOUD_BACKUP: &str = "Upload to Server";
 
 // blacklist: files never included in a save backup zip
 pub const BACKUP_BLACK_LIST: [&str; 4] = [
@@ -101,4 +94,4 @@ pub const DIALOG_CANCEL_TEXT: &str = "(〇) Cancel";
 pub const CANCEL_HINT: &str = "(〇) Stop";
 
 // about dialog text
-pub const ABOUT_TEXT: &str = "Save Sync — Two-Vita save sync tool by unveroleone"; 
+pub const ABOUT_TEXT: &str = "Save Sync — Two-Vita save sync tool by unveroleone";

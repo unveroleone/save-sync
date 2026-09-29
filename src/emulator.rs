@@ -1,17 +1,79 @@
 use std::{collections::HashMap, fs, path::Path};
 
 use crate::{
+    config::Config,
     constant::{
         PSP_SAVE_DIR, RETROARCH_DIR, RETROARCH_SAVE_EXTS, RETROARCH_SAVE_SUBDIRS,
         RETROARCH_SCAN_DEPTH,
     },
+    psx_vmp::is_vmp_filename,
     utils::{get_game_local_backup_dir, SaveTarget},
 };
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum EmulatorKind {
     Psp,
+    /// A PSP-folder-convention entry that's actually a PSX title under
+    /// Adrenaline (its folder holds SCEVMC0.VMP/SCEVMC1.VMP). Same `id`
+    /// prefix and folder layout as `Psp` — this only changes
+    /// classification/display, not identity.
+    Psx,
     RetroArch,
+}
+
+/// Inverse of the id prefix scan_emulator_entries() constructs below.
+/// PSX vs PSP is decidable from the id alone: PSP title IDs start with `U`
+/// or `N`, PS1 disc IDs (Adrenaline's SAVEDATA_DIRECTORY reuses these)
+/// always start with `S` — Sony's own convention, never overlapping. Works
+/// even for a pure-cloud entry with no local folder to inspect.
+///
+/// Gated on `convert_psx_saves` (passed in rather than read from
+/// `Config::global()` here, so a caller looping over many ids reads it
+/// once) to stay consistent with `scan_emulator_entries`, which only
+/// classifies a local folder as `Psx` when that setting is on.
+pub fn emulator_kind_from_entry_id(id: &str, convert_psx_saves: bool) -> Option<EmulatorKind> {
+    if let Some(title) = id.strip_prefix("PSP_") {
+        if convert_psx_saves && title.starts_with('S') {
+            Some(EmulatorKind::Psx)
+        } else {
+            Some(EmulatorKind::Psp)
+        }
+    } else if id.starts_with("RETROARCH_") {
+        Some(EmulatorKind::RetroArch)
+    } else {
+        None
+    }
+}
+
+/// Does this PSP-convention folder actually hold a PSX title's Adrenaline
+/// memory cards?
+fn is_psx_folder(folder: &str) -> bool {
+    let Ok(mut entries) = fs::read_dir(folder) else {
+        return false;
+    };
+    entries.any(|e| {
+        e.ok()
+            .and_then(|e| e.file_name().to_str().map(is_vmp_filename))
+            .unwrap_or(false)
+    })
+}
+
+/// Full paths of any Adrenaline memory card files (`SCEVMC0.VMP`/
+/// `SCEVMC1.VMP`) directly inside `folder`.
+fn vmp_files_in(folder: &str) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(is_vmp_filename)
+                .unwrap_or(false)
+        })
+        .map(|e| e.path().to_string_lossy().to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -68,6 +130,17 @@ impl EmulatorEntry {
         }
         match self.kind {
             EmulatorKind::Psp => SaveTarget::grouped(&paths, PSP_SAVE_DIR),
+            // Only the memory cards themselves, not the whole folder: a
+            // PC-side RetroArch upload of the same PSX save has no
+            // ICON0.PNG/PARAM.SFO/config.bin to match against, so including
+            // them would make the same save hash differently depending on
+            // which device backed it up. Safe to leave out on restore too —
+            // it only ever lands on a device that already has this title
+            // installed.
+            EmulatorKind::Psx => {
+                let vmp_files: Vec<String> = paths.iter().flat_map(|p| vmp_files_in(p)).collect();
+                SaveTarget::files(&vmp_files, PSP_SAVE_DIR)
+            }
             EmulatorKind::RetroArch => SaveTarget::files(&paths, RETROARCH_DIR),
         }
     }
@@ -76,9 +149,9 @@ impl EmulatorEntry {
     /// every other caller uses so the Cloud tab finds what the Games tab wrote.
     pub fn local_backup_dir(&self) -> String {
         let safe_name = match self.kind {
-            // PSP uses the raw id so the path also matches a cloud-only entry
-            // downloaded before the game was detected on this device.
-            EmulatorKind::Psp => self.id.to_string(),
+            // PSP/PSX use the raw id so the path also matches a cloud-only
+            // entry downloaded before the game was detected on this device.
+            EmulatorKind::Psp | EmulatorKind::Psx => self.id.to_string(),
             EmulatorKind::RetroArch => self.name.to_string(),
         };
         get_game_local_backup_dir(&self.id, &safe_name)
@@ -114,8 +187,9 @@ pub fn sfo_string(folder: &str, key: &str) -> Option<String> {
     let data_off = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
     let count = u32::from_le_bytes(data[16..20].try_into().ok()?) as usize;
 
+    const HEADER_SIZE: usize = 20;
     for i in 0..count {
-        let start = key_off.checked_add(i.checked_mul(16)?)?;
+        let start = HEADER_SIZE.checked_add(i.checked_mul(16)?)?;
         let idx = data.get(start..start.checked_add(16)?)?;
         let koff = key_off.checked_add(u16::from_le_bytes([idx[0], idx[1]]) as usize)?;
         let found = cstr_at(&data, koff)?;
@@ -126,7 +200,13 @@ pub fn sfo_string(folder: &str, key: &str) -> Option<String> {
         let doff = data_off.checked_add(u32::from_le_bytes(idx[12..16].try_into().ok()?) as usize)?;
         let raw = data.get(doff..doff.checked_add(dlen)?)?;
         let value = raw.split(|b| *b == 0).next()?.to_vec();
-        return String::from_utf8(value).ok().filter(|s| !s.is_empty());
+        // Some titles (e.g. multi-line save-icon titles on the original PSP
+        // UI) embed raw newlines; this app renders titles on one line, so
+        // collapse them before they reach any label or upload.
+        return String::from_utf8(value)
+            .ok()
+            .map(|s| s.replace(['\n', '\r'], " ").trim().to_string())
+            .filter(|s| !s.is_empty());
     }
     None
 }
@@ -144,6 +224,7 @@ pub fn psp_save_title(folder: &str) -> Option<String> {
 
 pub fn scan_emulator_entries() -> Vec<EmulatorEntry> {
     let mut entries = Vec::new();
+    let convert_psx = Config::global().convert_psx_saves;
 
     // PSP/Adrenaline saves — group folders by 9-char title ID.
     if let Ok(dir) = fs::read_dir(PSP_SAVE_DIR) {
@@ -190,11 +271,17 @@ pub fn scan_emulator_entries() -> Vec<EmulatorEntry> {
             // PARAM.SFO lives in the DATA slot, so look through every folder.
             let game_title = folders.iter().find_map(|(_, p)| psp_save_title(p));
 
+            let (kind, label) = if convert_psx && folders.iter().any(|(_, p)| is_psx_folder(p)) {
+                (EmulatorKind::Psx, "PSX")
+            } else {
+                (EmulatorKind::Psp, "PSP")
+            };
+
             let display_name = match (&game_title, folders.len() > 1) {
-                (Some(t), true) => format!("PSP: {} - {} ({} slots)", game_id, t, folders.len()),
-                (Some(t), false) => format!("PSP: {} - {}", game_id, t),
-                (None, true) => format!("PSP: {} ({} slots)", game_id, folders.len()),
-                (None, false) => format!("PSP: {}", game_id),
+                (Some(t), true) => format!("{}: {} - {} ({} slots)", label, game_id, t, folders.len()),
+                (Some(t), false) => format!("{}: {} - {}", label, game_id, t),
+                (None, true) => format!("{}: {} ({} slots)", label, game_id, folders.len()),
+                (None, false) => format!("{}: {}", label, game_id),
             };
 
             entries.push(EmulatorEntry {
@@ -203,7 +290,7 @@ pub fn scan_emulator_entries() -> Vec<EmulatorEntry> {
                 server_title: game_title.unwrap_or_default(),
                 source_path: primary_path,
                 extra_paths,
-                kind: EmulatorKind::Psp,
+                kind,
                 icon_path,
             });
         }
