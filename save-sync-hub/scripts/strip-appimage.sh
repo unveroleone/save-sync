@@ -66,6 +66,14 @@ export XDG_DATA_DIRS="$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS"
 export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
 EOF
 
+# The extracted tree comes out of mktemp with 0700 directories, and
+# linuxdeploy leaves AppRun.wrapped at 0770. Other users (the AppImage
+# catalog sandbox, multi-user installs) then cannot enter the directories or
+# run the binaries. Normalize to the usual 755/644 layout, keeping x bits.
+chmod -R u+rwX,go+rX,go-w .
+chmod 755 AppRun usr/bin/*
+[ ! -f AppRun.wrapped ] || chmod 755 AppRun.wrapped
+
 # Repack. appimagetool itself is an AppImage; APPIMAGE_EXTRACT_AND_RUN
 # avoids the FUSE requirement on CI runners.
 if ! command -v appimagetool >/dev/null 2>&1; then
