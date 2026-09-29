@@ -36,6 +36,19 @@ cd squashfs-root
 # directories, so the host libraries are used.
 rm -rf usr/lib usr/lib64
 
+# linuxdeploy leaves .DirIcon as an absolute symlink into the CI build
+# directory, which dangles on any other machine. The AppImage catalog test
+# fails with ".DirIcon is missing" because of it. Point it at the icon
+# that ships at the AppDir root instead.
+ICON_FILE="$(find . -maxdepth 1 -type f -name '*.png' | head -n1)"
+if [ -z "$ICON_FILE" ]; then
+    echo "no root-level icon found for .DirIcon" >&2
+    exit 1
+fi
+rm -f .DirIcon
+ln -s "$(basename "$ICON_FILE")" .DirIcon
+[ -e .DirIcon ] || { echo ".DirIcon still dangling" >&2; exit 1; }
+
 # Replace the linuxdeploy gtk hook: it exported paths into the deleted
 # bundled lib dirs (GTK_IM_MODULE_FILE, GTK_PATH, GIO_EXTRA_MODULES, ...)
 # and forced the bundled Adwaita theme over the user's theme. Keep
