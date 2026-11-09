@@ -47,6 +47,10 @@ impl GameMenu {
         self.list.is_pending()
     }
 
+    pub fn take_sync_exclusion_changed(&mut self) -> bool {
+        self.list.take_sync_exclusion_changed()
+    }
+
     pub fn open(&mut self) {
         self.list.set_native();
         self.open_drawer();
@@ -88,6 +92,9 @@ impl GameMenu {
             self.close();
         } else {
             self.list.update(buttons, title, titles, emu);
+            if self.list.sync_exclusion_changed() {
+                self.close();
+            }
         }
     }
 
