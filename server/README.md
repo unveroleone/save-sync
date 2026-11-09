@@ -69,10 +69,10 @@ RAW_SAVES_DIR=/path/to/raw-saves
 ```
 
 - Every uploaded save is extracted into `$RAW_SAVES_DIR/<TITLEID> - <Game Name>/` as plain files.
-- **RetroArch saves are the exception**: they mirror at `$RAW_SAVES_DIR/savefiles/<core>/<rom>.srm` (and `savestates/...`) with no per-game wrapper folder, matching RetroArch's own on-device layout — this is what makes them fold in with an existing RetroArch Syncthing setup. Each ROM is still tracked and versioned as its own save; only the mirror layout is flattened. Safe because RetroArch save file names are unique per ROM, so games sharing a core folder never collide.
+- **RetroArch saves are the exception**: they mirror at `$RAW_SAVES_DIR/savefiles/<core>/<rom>.srm` (and `savestates/...`) with no per-game wrapper folder, matching RetroArch's own on-device layout. This is what makes them fold in with an existing RetroArch Syncthing setup. Each ROM is still tracked and versioned as its own save; only the mirror layout is flattened. Safe because RetroArch save file names are unique per ROM, so games sharing a core folder never collide.
 - Saves uploaded before you enabled the option are extracted on their next download.
 - Point Syncthing at the `RAW_SAVES_DIR` root itself, so Syncthing's own `.stfolder`/`.stversions` folders stay outside the game folders.
-- Keep `RAW_SAVES_DIR` **outside** `DATA_DIR` — the server refuses to start if the two overlap.
+- Keep `RAW_SAVES_DIR` **outside** `DATA_DIR`. The server refuses to start if the two overlap.
 
 The mirror works in both directions:
 
@@ -82,12 +82,12 @@ The mirror works in both directions:
 Things to know:
 
 - **Deleting all files in a mirror folder creates an empty archive, and restoring it wipes the save on the Vita.** Deleting individual files also propagates.
-- A new upload from the Vita overwrites the mirror and wins over un-merged edits. If mirroring the upload fails, the mirror is removed and re-created from the upload on the next download — the upload still wins. (That removal also propagates to all Syncthing peers, like any other mirror change.)
+- A new upload from the Vita overwrites the mirror and wins over un-merged edits. If mirroring the upload fails, the mirror is removed and re-created from the upload on the next download, and the upload still wins. (That removal also propagates to all Syncthing peers, like any other mirror change.)
 - While Syncthing is actively transferring into a mirror (`.syncthing.*.tmp` files present), the server skips the round-trip that cycle and serves the stored archive instead.
 - Syncthing conflict files (`.sync-conflict-*`) are regular files and get included in rebuilt archives.
-- Symbolic links in the mirror are followed when rebuilding — don't point links at unrelated files.
+- Symbolic links in the mirror are followed when rebuilding, so don't point links at unrelated files.
 - Every upload replaces the mirror folder, which Syncthing sees as delete+add churn even when nothing changed.
-- For RetroArch saves specifically, a file that was never part of a previous upload (e.g. a savestate slot you create by hand directly in the synced folder) is not picked up automatically — only files that already round-tripped once are tracked for edits and deletions. Upload from the Vita once to start tracking it.
+- For RetroArch saves specifically, a file that was never part of a previous upload (e.g. a savestate slot you create by hand directly in the synced folder) is not picked up automatically. Only files that already round-tripped once are tracked for edits and deletions. Upload from the Vita once to start tracking it.
 
 ## Production deployment
 

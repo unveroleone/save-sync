@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/github/v/release/unveroleone/vita-save-sync" alt="version">
+  <img src="https://img.shields.io/github/v/release/unveroleone/save-sync" alt="version">
   <img src="https://img.shields.io/badge/server-Node.js%20%7C%20Fastify-111111?style=flat-square" alt="Node.js">
   <img src="https://img.shields.io/badge/vita-Rust%20%2B%20vita2d-111111?style=flat-square" alt="Vita client">
   <img src="https://img.shields.io/badge/desktop%20%2F%20android-Tauri%20v2%20%2B%20Svelte-111111?style=flat-square" alt="Desktop client">
@@ -44,7 +44,7 @@ One server, multiple clients. All saves go to the same place.
 
 ## Clients at a glance
 
-| Client | Runs on | Emu  lators / saves |
+| Client | Runs on | Emulators / saves |
 |--------|---------|-------------------|
 | Save Sync (Vita app) | PS Vita, PSTV | Native Vita · PSP (Adrenaline) · RetroArch |
 | Save Sync Hub | macOS · Windows · Linux · Android | PPSSPP · RetroArch · Custom path |
@@ -57,7 +57,7 @@ The Vita app requires HENkaku + iTLS-Enso. Save Sync Hub is a standard desktop/A
 
 The server is a small Node.js app. It stores save files on disk and exposes a REST API. You need to keep it running while you sync, it does not need to be on 24/7.
 
-**Syncthing / unzipped saves:** set `RAW_SAVES_DIR` to mirror every save as plain files on disk — point Syncthing at that folder and edits synced back flow into the next download. See [server/README.md](server/README.md) for details.
+**Syncthing / unzipped saves:** set `RAW_SAVES_DIR` to mirror every save as plain files on disk. Point Syncthing at that folder and edits synced back flow into the next download. See [server/README.md](server/README.md) for details.
 
 Pick the option that fits your situation.
 
@@ -117,8 +117,8 @@ Put the server behind Nginx Proxy Manager or Cloudflare Tunnel for HTTPS. The Vi
 You need [Node.js](https://nodejs.org/) 20 or newer. Works on macOS, Windows, and Linux.
 
 ```bash
-git clone https://github.com/unveroleone/vita-save-sync.git
-cd vita-save-sync/server
+git clone https://github.com/unveroleone/save-sync.git
+cd save-sync/server
 npm install
 npm run build
 USER_TOKEN=your-secret-token DATA_DIR=./data node dist/index.js
@@ -147,8 +147,8 @@ sudo apt install -y nodejs git
 **Clone and start:**
 
 ```bash
-git clone https://github.com/unveroleone/vita-save-sync.git
-cd vita-save-sync/server
+git clone https://github.com/unveroleone/save-sync.git
+cd save-sync/server
 npm install
 npm run build
 USER_TOKEN=your-secret-token DATA_DIR=./data node dist/index.js
@@ -168,9 +168,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/vita-save-sync/server
+WorkingDirectory=/home/pi/save-sync/server
 Environment=USER_TOKEN=your-secret-token
-Environment=DATA_DIR=/home/pi/vita-save-sync/server/data
+Environment=DATA_DIR=/home/pi/save-sync/server/data
 Environment=PORT=3000
 ExecStart=/usr/bin/node dist/index.js
 Restart=on-failure
@@ -212,19 +212,19 @@ Save this as `~/Library/LaunchAgents/com.vita-save-sync.plist`, replacing the pa
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/node</string>
-        <string>/Users/you/vita-save-sync/server/dist/index.js</string>
+        <string>/Users/you/save-sync/server/dist/index.js</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>USER_TOKEN</key>
         <string>your-secret-token</string>
         <key>DATA_DIR</key>
-        <string>/Users/you/vita-save-sync/server/data</string>
+        <string>/Users/you/save-sync/server/data</string>
         <key>PORT</key>
         <string>3000</string>
     </dict>
     <key>WorkingDirectory</key>
-    <string>/Users/you/vita-save-sync/server</string>
+    <string>/Users/you/save-sync/server</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -271,7 +271,7 @@ For a permanent setup with your own domain, [Cloudflare Tunnel with a named tunn
 
 ## First-time setup on the Vita
 
-Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/info/1418) (search "Save Sync") or download it from [GitHub Releases](https://github.com/unveroleone/vita-save-sync/releases) and install manually via VitaShell.
+Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/info/1418) (search "Save Sync") or download it from [GitHub Releases](https://github.com/unveroleone/save-sync/releases) and install manually via VitaShell.
 
 1. Install the VPK
 2. Open Save Sync
@@ -290,7 +290,7 @@ Install the VPK via [VitaDB Downloader](https://www.rinnegatamante.eu/vitadb/#/i
 
 Save Sync Hub is the companion app for PC and Android. It syncs PPSSPP and RetroArch saves using the same server and API token as the Vita app.
 
-Download the latest release from [GitHub Releases](https://github.com/unveroleone/vita-save-sync/releases) for your platform (`.dmg` for macOS, `.exe` for Windows, `.AppImage` for Linux, `.apk` for Android).
+Download the latest release from [GitHub Releases](https://github.com/unveroleone/save-sync/releases) for your platform (`.dmg` for macOS, `.exe` for Windows, `.AppImage` for Linux, `.apk` for Android).
 
 ### First-time setup
 
@@ -310,7 +310,7 @@ Download the latest release from [GitHub Releases](https://github.com/unveroleon
 | Linux | `~/.config/ppsspp/PSP/SAVEDATA` | `~/.config/retroarch` |
 | Android | `/storage/emulated/0/PSP/SAVEDATA` | `/storage/emulated/0/RetroArch` |
 
-> These are the most common defaults. PPSSPP varies by install method — if your saves are not found, use Browse to point to the right folder. For RetroArch, the app scans for `saves/` and `states/` subdirectories inside the path above.
+> These are the most common defaults. PPSSPP varies by install method. If your saves are not found, use Browse to point to the right folder. For RetroArch, the app scans the `saves/`, `savefiles/`, `states/` and `savestates/` subfolders inside the path above.
 
 ### Workflow
 
@@ -318,7 +318,7 @@ Download the latest release from [GitHub Releases](https://github.com/unveroleon
 - **Download**: fetches the latest backup from the server to a local zip
 - **Restore**: downloads from the server and extracts directly into the save folder
 
-Save IDs on the server use the folder name as the title ID, prefixed with `PSP_` or `RA_` to avoid collisions with native Vita saves.
+Save IDs on the server use the folder name as the title ID, prefixed with `PSP_` or `RETROARCH_` to avoid collisions with native Vita saves.
 
 ---
 
@@ -354,6 +354,13 @@ Press **L** to see your local saves. Select a game and press **X** to open the s
 - **Server Backup** tab (press **R** in the drawer) has manual Upload, Download, and Download & Restore options.
 
 For daily use, the Cloud tab is faster. The drawer is there for the manual actions.
+
+### Excluding games from sync
+
+Some saves should stay on one device. Excluded games disappear from the Games tab, the Cloud tab and Sync All, and nothing is uploaded or downloaded for them.
+
+- **One game:** in the Games tab, select the game, press **Triangle** and pick **Exclude from Sync**.
+- **Everything at once:** open Settings (**Triangle** on the Cloud tab) and select **Sync Exclusions**. Games are grouped by platform, with a checkbox per game and one per platform. Press **Left** / **Right** to page through long lists. Uncheck a game here to sync it again.
 
 <img src="assets/icons/game2.png" width="480" alt="Save Sync save drawer">
 <img src="assets/icons/game1.png" width="480" alt="Save Sync save drawer">
