@@ -352,14 +352,18 @@ impl UITitles {
                     let border = 2;
                     let has_icon = self.icons.contains_key(&icon_idx);
                     if has_icon {
-                        // PSP ICON0.PNG is 144x80 (16:9). Scale to fill height, center-crop width.
+                        // ICON0.PNG aspect ratio varies by platform (PSP is
+                        // 144x80, PS1 is 80x80 under Adrenaline). Scale to
+                        // fill the cell height using the texture's real size,
+                        // then center-crop width so any ratio lands centered.
                         vita2d_draw_rect(x as f32, y as f32, cell_size as f32, cell_size as f32, icon_bg);
-                        let scale = cell_size as f32 / 80.0;
-                        let draw_w = (144.0 * scale) as i32;
+                        let texture = self.icons.get(&icon_idx).expect("emu icon");
+                        let scale = cell_size as f32 / texture.height() as f32;
+                        let draw_w = (texture.width() as f32 * scale) as i32;
                         let x_draw = x - (draw_w - cell_size) / 2;
                         vita2d_set_clip(x, y, x + cell_size, y + cell_size);
                         vita2d_draw_texture_scale(
-                            self.icons.get(&icon_idx).expect("emu icon"),
+                            texture,
                             x_draw as f32,
                             y as f32,
                             scale,

@@ -61,6 +61,8 @@ extern "C" {
     fn vita2d_enable_clipping();
     fn vita2d_disable_clipping();
     fn vita2d_set_clip_rectangle(x_min: c_int, y_min: c_int, x_max: c_int, y_max: c_int);
+    fn vita2d_texture_get_width(texture: *const c_void) -> c_uint;
+    fn vita2d_texture_get_height(texture: *const c_void) -> c_uint;
 }
 
 pub struct Vita2dTexture {
@@ -70,6 +72,14 @@ pub struct Vita2dTexture {
 impl Vita2dTexture {
     pub fn new(tex: *mut c_void) -> Vita2dTexture {
         Vita2dTexture { tex }
+    }
+
+    pub fn width(&self) -> u32 {
+        unsafe { vita2d_texture_get_width(self.tex) }
+    }
+
+    pub fn height(&self) -> u32 {
+        unsafe { vita2d_texture_get_height(self.tex) }
     }
 }
 
