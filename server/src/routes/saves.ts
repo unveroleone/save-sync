@@ -70,6 +70,18 @@ async function withTitleLock<T>(titleId: string, fn: () => Promise<T>): Promise<
 /// Rotates the previous archive into versions/, installs tmpPath as the new
 /// current.zip, and updates the manifest to match. Shared by both mirror
 /// modes' rebuild path.
+/// Path for a rotated-out archive in `versionsDir`. Client timestamps only
+/// have whole seconds, so two uploads in the same second would otherwise
+/// overwrite an older version; add a counter instead.
+function uniqueVersionPath(versionsDir: string, timestamp: string): string {
+  const base = timestamp.replace(/[:.]/g, '-');
+  let candidate = path.join(versionsDir, base + '.zip');
+  for (let n = 1; fs.existsSync(candidate); n++) {
+    candidate = path.join(versionsDir, `${base}-${n}.zip`);
+  }
+  return candidate;
+}
+
 function installRebuiltZip(
   userName: string,
   titleId: string,
@@ -81,8 +93,7 @@ function installRebuiltZip(
   const now = new Date().toISOString();
   if (fs.existsSync(currentPath)) {
     ensureDir(path.join(parent, 'versions'));
-    const versionName = now.replace(/[:.]/g, '-') + '.zip';
-    fs.renameSync(currentPath, path.join(parent, 'versions', versionName));
+    fs.renameSync(currentPath, uniqueVersionPath(path.join(parent, 'versions'), now));
   }
   fs.renameSync(tmpPath, currentPath);
   const manifest = readManifest(userName);
@@ -325,8 +336,7 @@ export async function savesRoutes(app: FastifyInstance): Promise<void> {
 
         if (fs.existsSync(currentPath)) {
           ensureDir(versionsDir);
-          const versionName = timestamp.replace(/[:.]/g, '-') + '.zip';
-          fs.renameSync(currentPath, path.join(versionsDir, versionName));
+          fs.renameSync(currentPath, uniqueVersionPath(versionsDir, timestamp));
         }
 
         fs.renameSync(tmpPath, currentPath);
