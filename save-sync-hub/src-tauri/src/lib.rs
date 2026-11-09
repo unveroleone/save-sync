@@ -25,7 +25,14 @@ struct AppState {
 
 impl AppState {
     fn config(&self) -> Result<SyncConfig, String> {
-        self.config.lock().map(|c| c.clone()).map_err(|e| e.to_string())
+        Ok(self.config.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    }
+
+    /// Recover from poisoning: the guarded data is `()`, so a command that
+    /// panicked while holding it leaves nothing inconsistent behind, and
+    /// failing every later command until a restart would be worse.
+    fn sync_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.sync_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn require_server(&self) -> Result<SyncConfig, String> {
@@ -261,18 +268,14 @@ fn process_single_entry(
 #[tauri::command]
 fn load_config_cmd(state: State<AppState>) -> SyncConfig {
     let conf = load_config();
-    if let Ok(mut c) = state.config.lock() {
-        *c = conf.clone();
-    }
+    *state.config.lock().unwrap_or_else(|e| e.into_inner()) = conf.clone();
     conf
 }
 
 #[tauri::command]
 fn save_config_cmd(state: State<AppState>, config: SyncConfig) -> Result<(), String> {
     save_config(&config)?;
-    if let Ok(mut c) = state.config.lock() {
-        *c = config;
-    }
+    *state.config.lock().unwrap_or_else(|e| e.into_inner()) = config;
     Ok(())
 }
 
@@ -309,7 +312,7 @@ fn scan_saves(
     }
 
     let config = state.config()?;
-    let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+    let _guard = state.sync_guard();
     let cloud_games = match fetch_cloud_manifest(&config) {
         Ok(m) => m,
         Err(_) => HashMap::new(),
@@ -642,7 +645,7 @@ fn backup_and_upload(
     zip_root: Option<String>,
 ) -> Result<String, String> {
     let config = state.require_server()?;
-    let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+    let _guard = state.sync_guard();
 
     let tmp_dir = temp_dir();
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -733,7 +736,7 @@ fn download_and_restore(
     restore_dir: String,
 ) -> Result<String, String> {
     let config = state.require_server()?;
-    let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+    let _guard = state.sync_guard();
     if restore_dir.is_empty() || !Path::new(&restore_dir).is_dir() {
         return Err(format!("Restore folder does not exist: {}", restore_dir));
     }
@@ -752,7 +755,12 @@ fn download_and_restore(
     let mut extract_to = PathBuf::from(&restore_dir);
     if title_id.starts_with("PSP_") && backup::zip_has_root_files(&zip_str)? {
         let folder = backup::zip_sfo_string(&zip_str, "PARAM.SFO", "SAVEDATA_DIRECTORY")
-            .filter(|f| psp_title_prefix(f).is_some() && !f.contains(['/', '\\']) && !f.contains(".."))
+            .filter(|f| {
+                let game_id = &title_id["PSP_".len()..];
+                psp_title_prefix(f).as_deref() == Some(game_id)
+                    && !f.contains(['/', '\\'])
+                    && !f.contains("..")
+            })
             .ok_or("This PSP save was uploaded without its folder and has no SAVEDATA_DIRECTORY, so it cannot be placed safely")?;
         extract_to.push(folder);
     }
@@ -780,7 +788,7 @@ fn download_only(
     title_id: String,
 ) -> Result<String, String> {
     let config = state.require_server()?;
-    let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+    let _guard = state.sync_guard();
 
     let tmp_dir = temp_dir();
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -858,7 +866,7 @@ fn find_local_icons(search_paths: &[String]) -> HashMap<String, String> {
 #[tauri::command(async)]
 fn delete_cloud_save(state: State<AppState>, title_id: String) -> Result<(), String> {
     let config = state.require_server()?;
-    let _guard = state.sync_lock.lock().map_err(|e| e.to_string())?;
+    let _guard = state.sync_guard();
     api::delete_save(&config, &title_id)?;
     // Remove from local manifest too
     let mut manifest = LocalManifest::load(&manifest_path());
