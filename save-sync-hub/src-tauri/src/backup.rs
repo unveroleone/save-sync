@@ -259,3 +259,57 @@ pub fn zip_extract(from: &str, to: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// True when the archive has a file at its top level instead of only inside
+/// folders.
+pub fn zip_has_root_files(path: &str) -> Result<bool, String> {
+    let file = fs::File::open(path).map_err(|e| format!("Open zip failed: {}", e))?;
+    let archive = zip::ZipArchive::new(file).map_err(|e| format!("Read zip failed: {}", e))?;
+    let has_root_file = archive
+        .file_names()
+        .any(|name| !name.ends_with('/') && !name.trim_start_matches('/').contains('/'));
+    Ok(has_root_file)
+}
+
+/// String value `key` from the PARAM.SFO stored at `entry` in the archive.
+pub fn zip_sfo_string(path: &str, entry: &str, key: &str) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut sfo = archive.by_name(entry).ok()?;
+    let mut data = Vec::new();
+    sfo.read_to_end(&mut data).ok()?;
+    sfo_string(&data, key)
+}
+
+/// PARAM.SFO layout (extern/VitaShell/sfo.h): a 20-byte header (magic
+/// "\0PSF", version, key table offset, data table offset, entry count),
+/// followed by 16-byte index entries (key offset u16, format u16, length
+/// u32, max length u32, data offset u32).
+fn sfo_string(data: &[u8], key: &str) -> Option<String> {
+    const HEADER_SIZE: usize = 20;
+    if data.len() < HEADER_SIZE || data[0..4] != [0x00, 0x50, 0x53, 0x46] {
+        return None;
+    }
+    let u32_at = |off: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(data.get(off..off + 4)?.try_into().ok()?) as usize)
+    };
+    let key_off = u32_at(8)?;
+    let data_off = u32_at(12)?;
+    let count = u32_at(16)?;
+    for i in 0..count {
+        let idx = HEADER_SIZE.checked_add(i.checked_mul(16)?)?;
+        let entry = data.get(idx..idx.checked_add(16)?)?;
+        let name_off = key_off.checked_add(u16::from_le_bytes([entry[0], entry[1]]) as usize)?;
+        let name_bytes = data.get(name_off..)?;
+        let name_end = name_bytes.iter().position(|b| *b == 0)?;
+        if &name_bytes[..name_end] != key.as_bytes() {
+            continue;
+        }
+        let len = u32::from_le_bytes(entry[4..8].try_into().ok()?) as usize;
+        let start = data_off.checked_add(u32::from_le_bytes(entry[12..16].try_into().ok()?) as usize)?;
+        let raw = data.get(start..start.checked_add(len)?)?;
+        let value = raw.split(|b| *b == 0).next()?;
+        return String::from_utf8(value.to_vec()).ok().filter(|s| !s.is_empty());
+    }
+    None
+}

@@ -16,9 +16,41 @@ use emulator_paths::{get_platform_paths, Platform};
 use sync::{compute_status, GameSyncEntry, LocalManifest, SyncStatus};
 
 struct AppState {
-    #[allow(dead_code)]
-    manifest: Mutex<LocalManifest>,
     config: Mutex<SyncConfig>,
+    /// Serializes commands that read-modify-write the local manifest or
+    /// share a temp zip path. Commands run off the main thread, so two of
+    /// them can otherwise overlap.
+    sync_lock: Mutex<()>,
+}
+
+impl AppState {
+    fn config(&self) -> Result<SyncConfig, String> {
+        Ok(self.config.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    }
+
+    /// Recover from poisoning: the guarded data is `()`, so a command that
+    /// panicked while holding it leaves nothing inconsistent behind, and
+    /// failing every later command until a restart would be worse.
+    fn sync_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.sync_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn require_server(&self) -> Result<SyncConfig, String> {
+        let config = self.config()?;
+        if config.server_url.is_empty() || config.api_token.is_empty() {
+            return Err("Server not configured".to_string());
+        }
+        Ok(config)
+    }
+}
+
+/// Removes a temp file when dropped, so error paths do not leak zips.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn manifest_path() -> PathBuf {
@@ -86,10 +118,8 @@ struct CloudSaveEntry {
 
 // Mirrors Vita's psp_title_prefix: 4 alpha letters + 5 ascii digits = 9 chars.
 fn psp_title_prefix(folder: &str) -> Option<String> {
-    if folder.len() < 9 {
-        return None;
-    }
-    let prefix = &folder[..9];
+    // get() instead of slicing: a multi-byte char across byte 9 must not panic.
+    let prefix = folder.get(..9)?;
     let b = prefix.as_bytes();
     if b[..4].iter().all(|c| c.is_ascii_alphabetic()) && b[4..].iter().all(|c| c.is_ascii_digit()) {
         Some(prefix.to_string())
@@ -156,20 +186,16 @@ fn collect_retroarch_files(
     }
 }
 
-/// Auto-correct stale reference hashes after backup/restore operations.
-/// Local and cloud use different hash methods (dir vs zip), so after a
-/// sync operation the reference hash for one side may be from the wrong
-/// domain. On scan, if cloud hasn't changed but the local reference is
-/// stale, fix it silently.
+/// Fill in the local reference hash after a restore. A restore records the
+/// cloud reference but clears the local one (the restored files are only
+/// hashed by the next scan). If the cloud is still at the restored version,
+/// adopt the current local hash as the reference. Only a missing reference
+/// is filled: a reference that differs means the save changed locally since
+/// the last sync, and must stay visible as "upload needed".
 fn correct_sync_refs(entry: &mut GameSyncEntry) {
-    if let (Some(ref local), Some(ref cloud)) = (&entry.local_hash, &entry.cloud_hash) {
-        if let Some(ref last_cloud) = entry.last_synced_cloud_hash {
-            if last_cloud == cloud {
-                // Cloud unchanged — if local ref is stale (or missing), auto-fix.
-                if entry.last_synced_hash.as_ref().map_or(true, |h| h != local) {
-                    entry.last_synced_hash = Some(local.clone());
-                }
-            }
+    if let (Some(local), Some(cloud)) = (&entry.local_hash, &entry.cloud_hash) {
+        if entry.last_synced_cloud_hash.as_ref() == Some(cloud) && entry.last_synced_hash.is_none() {
+            entry.last_synced_hash = Some(local.clone());
         }
     }
 }
@@ -242,22 +268,18 @@ fn process_single_entry(
 #[tauri::command]
 fn load_config_cmd(state: State<AppState>) -> SyncConfig {
     let conf = load_config();
-    if let Ok(mut c) = state.config.lock() {
-        *c = conf.clone();
-    }
+    *state.config.lock().unwrap_or_else(|e| e.into_inner()) = conf.clone();
     conf
 }
 
 #[tauri::command]
 fn save_config_cmd(state: State<AppState>, config: SyncConfig) -> Result<(), String> {
     save_config(&config)?;
-    if let Ok(mut c) = state.config.lock() {
-        *c = config;
-    }
+    *state.config.lock().unwrap_or_else(|e| e.into_inner()) = config;
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn scan_saves(
     state: State<AppState>,
     platform: String,
@@ -289,7 +311,8 @@ fn scan_saves(
         return Ok(Vec::new());
     }
 
-    let config = state.config.lock().map_err(|e| e.to_string())?;
+    let config = state.config()?;
+    let _guard = state.sync_guard();
     let cloud_games = match fetch_cloud_manifest(&config) {
         Ok(m) => m,
         Err(_) => HashMap::new(),
@@ -614,50 +637,28 @@ fn resolve_platform_path(platform: String, custom_path: Option<String>) -> Resul
     Ok(paths.save_dir)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn backup_and_upload(
     state: State<AppState>,
     title_id: String,
     all_paths: Vec<String>,
     zip_root: Option<String>,
 ) -> Result<String, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.server_url.is_empty() || config.api_token.is_empty() {
-        return Err("Server not configured".to_string());
-    }
+    let config = state.require_server()?;
+    let _guard = state.sync_guard();
 
     let tmp_dir = temp_dir();
     let _ = std::fs::create_dir_all(&tmp_dir);
-    let zip_name = format!("{}.zip", title_id);
-    let zip_path = tmp_dir.join(&zip_name);
+    let zip_path = tmp_dir.join(format!("{}.zip", title_id));
+    let _cleanup = TempFile(zip_path.clone());
 
-    let has_files = all_paths.iter().any(|p| Path::new(p).is_file());
-    // Entry names are relative to zip_root (a RetroArch entry holds save
-    // files, which must restore back into savefiles/ etc). Fall back to
-    // the bare file name when a path sits outside the root.
-    let root_prefix = zip_root
-        .as_ref()
-        .map(|r| format!("{}/", r.trim_end_matches('/')))
-        .unwrap_or_default();
-    let sources: Vec<(String, String)> = if all_paths.len() == 1 && !has_files {
-        vec![(String::new(), all_paths[0].clone())]
-    } else {
-        all_paths
-            .iter()
-            .map(|p| {
-                let rel = match p.strip_prefix(&root_prefix) {
-                    Some(rel) => rel.to_string(),
-                    None => Path::new(p)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| p.clone()),
-                };
-                (rel, p.clone())
-            })
-            .collect()
-    };
-    if all_paths.len() == 1 && !has_files {
-        backup::zip_dir(&all_paths[0], &zip_path.to_string_lossy())?;
+    let sources = archive_sources(&all_paths, zip_root.as_deref());
+    // A source that is the zip root itself (a custom-path folder restored
+    // in place) stores its contents at the archive root. Everything else
+    // keeps its path below the root: PSP slot folders under SAVEDATA, the
+    // same layout the Vita app uploads, and RetroArch files under saves/.
+    if sources.len() == 1 && sources[0].0.is_empty() && Path::new(&sources[0].1).is_dir() {
+        backup::zip_dir(&sources[0].1, &zip_path.to_string_lossy())?;
     } else {
         backup::zip_dirs(&sources, &zip_path.to_string_lossy())?;
     }
@@ -700,55 +701,94 @@ fn backup_and_upload(
     manifest.updated_at = chrono_now();
     manifest.save(&manifest_path());
 
-    let _ = std::fs::remove_file(&zip_path);
     Ok("Upload complete".to_string())
 }
 
-#[tauri::command]
+/// `(zip_entry_name, fs_path)` pairs with entry names relative to `zip_root`
+/// using `/` separators. A path outside the root falls back to its file name.
+fn archive_sources(all_paths: &[String], zip_root: Option<&str>) -> Vec<(String, String)> {
+    all_paths
+        .iter()
+        .map(|p| {
+            let path = Path::new(p);
+            let rel = zip_root
+                .and_then(|root| path.strip_prefix(root).ok())
+                .map(|rel| {
+                    rel.components()
+                        .map(|c| c.as_os_str().to_string_lossy().to_string())
+                        .collect::<Vec<_>>()
+                        .join("/")
+                })
+                .unwrap_or_else(|| {
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| p.clone())
+                });
+            (rel, p.clone())
+        })
+        .collect()
+}
+
+#[tauri::command(async)]
 fn download_and_restore(
     state: State<AppState>,
     title_id: String,
     restore_dir: String,
 ) -> Result<String, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.server_url.is_empty() || config.api_token.is_empty() {
-        return Err("Server not configured".to_string());
+    let config = state.require_server()?;
+    let _guard = state.sync_guard();
+    if restore_dir.is_empty() || !Path::new(&restore_dir).is_dir() {
+        return Err(format!("Restore folder does not exist: {}", restore_dir));
     }
 
     let tmp_dir = temp_dir();
     let _ = std::fs::create_dir_all(&tmp_dir);
     let zip_path = tmp_dir.join(format!("{}.zip", title_id));
+    let _cleanup = TempFile(zip_path.clone());
+    let zip_str = zip_path.to_string_lossy().to_string();
 
-    api::download_save(&config, &title_id, &zip_path.to_string_lossy())?;
-    backup::zip_extract(&zip_path.to_string_lossy(), &restore_dir)?;
+    let served = api::download_save(&config, &title_id, &zip_str)?;
 
-    let cloud_manifest = api::get_manifest(&config)?;
-    let mut manifest = LocalManifest::load(&manifest_path());
-    if let Some(ce) = cloud_manifest.games.get(&title_id) {
-        if let Some(entry) = manifest.games.get_mut(&title_id) {
-            entry.cloud_hash = Some(ce.latest_hash.clone());
-            entry.cloud_timestamp = Some(ce.latest_version.clone());
-            entry.last_synced_cloud_hash = Some(ce.latest_hash.clone());
-            // Clear the local reference — it will be recomputed on next scan.
-            entry.last_synced_hash = None;
-        }
+    // Hub versions before 0.1.12 uploaded single-slot PSP saves without
+    // their slot folder. Put those files back into the folder named by the
+    // save's own PARAM.SFO instead of loose into SAVEDATA.
+    let mut extract_to = PathBuf::from(&restore_dir);
+    if title_id.starts_with("PSP_") && backup::zip_has_root_files(&zip_str)? {
+        let folder = backup::zip_sfo_string(&zip_str, "PARAM.SFO", "SAVEDATA_DIRECTORY")
+            .filter(|f| {
+                let game_id = &title_id["PSP_".len()..];
+                psp_title_prefix(f).as_deref() == Some(game_id)
+                    && !f.contains(['/', '\\'])
+                    && !f.contains("..")
+            })
+            .ok_or("This PSP save was uploaded without its folder and has no SAVEDATA_DIRECTORY, so it cannot be placed safely")?;
+        extract_to.push(folder);
     }
+    backup::zip_extract(&zip_str, &extract_to.to_string_lossy())?;
+
+    let mut manifest = LocalManifest::load(&manifest_path());
+    let entry = manifest.games.entry(title_id.clone()).or_insert_with(|| GameSyncEntry {
+        title: title_id.clone(),
+        ..Default::default()
+    });
+    entry.cloud_hash = Some(served.hash.clone());
+    entry.cloud_timestamp = Some(served.timestamp);
+    entry.last_synced_cloud_hash = Some(served.hash);
+    // The local reference is filled in by the next scan (correct_sync_refs).
+    entry.last_synced_hash = None;
     manifest.updated_at = chrono_now();
     manifest.save(&manifest_path());
 
-    let _ = std::fs::remove_file(&zip_path);
     Ok("Restore complete".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn download_only(
     state: State<AppState>,
     title_id: String,
 ) -> Result<String, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.server_url.is_empty() || config.api_token.is_empty() {
-        return Err("Server not configured".to_string());
-    }
+    let config = state.require_server()?;
+    let _guard = state.sync_guard();
 
     let tmp_dir = temp_dir();
     let _ = std::fs::create_dir_all(&tmp_dir);
@@ -759,15 +799,12 @@ fn download_only(
     Ok(zip_path.to_string_lossy().to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_cloud_saves(
     state: State<AppState>,
     search_paths: Vec<String>,
 ) -> Result<Vec<CloudSaveEntry>, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.server_url.is_empty() || config.api_token.is_empty() {
-        return Err("Server not configured".to_string());
-    }
+    let config = state.require_server()?;
 
     // Try to find local icons for PSP cloud entries by matching title IDs
     // against folders in any of the local search paths.
@@ -826,12 +863,10 @@ fn find_local_icons(search_paths: &[String]) -> HashMap<String, String> {
     map
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_cloud_save(state: State<AppState>, title_id: String) -> Result<(), String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.server_url.is_empty() || config.api_token.is_empty() {
-        return Err("Server not configured".to_string());
-    }
+    let config = state.require_server()?;
+    let _guard = state.sync_guard();
     api::delete_save(&config, &title_id)?;
     // Remove from local manifest too
     let mut manifest = LocalManifest::load(&manifest_path());
@@ -841,12 +876,9 @@ fn delete_cloud_save(state: State<AppState>, title_id: String) -> Result<(), Str
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn get_devices(state: State<AppState>) -> Result<Vec<DeviceEntry>, String> {
-    let config = state.config.lock().map_err(|e| e.to_string())?;
-    if config.server_url.is_empty() || config.api_token.is_empty() {
-        return Err("Server not configured".to_string());
-    }
+    let config = state.require_server()?;
     api::get_devices(&config)
 }
 
@@ -978,8 +1010,8 @@ fn is_leap(year: i64) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app_state = AppState {
-        manifest: Mutex::new(LocalManifest::default()),
         config: Mutex::new(load_config()),
+        sync_lock: Mutex::new(()),
     };
 
     tauri::Builder::default()

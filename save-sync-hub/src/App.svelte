@@ -160,9 +160,13 @@
 
   async function handleSaveConfig() {
     try {
-      await invoke("save_config_cmd", {
-        config: { server_url: serverUrl, api_token: apiToken, device_name: deviceName },
-      });
+      // Read-modify-write: the saved config also holds the sources list,
+      // which a bare { server_url, api_token, device_name } would wipe.
+      const c: any = await invoke("load_config_cmd");
+      c.server_url = serverUrl;
+      c.api_token = apiToken;
+      c.device_name = deviceName;
+      await invoke("save_config_cmd", { config: c });
       message = "Config saved.";
       setTimeout(() => (message = ""), 2000);
     } catch (e: any) {
@@ -195,6 +199,7 @@
     message = "Downloading & restoring...";
     try {
       const res = await invoke("download_and_restore", { titleId, restoreDir });
+      await scanAll();
       message = res as string;
     } catch (e: any) {
       message = "Error: " + e;
@@ -205,7 +210,7 @@
     cloudLoading = true;
     message = "";
     try {
-      const paths = sources.map(s => s.resolvedPath).filter(Boolean);
+      const paths = sources.map(s => s.resolvedPath).filter(p => p && p !== "Not found");
       cloudEntries = await invoke("get_cloud_saves", { searchPaths: paths });
     } catch (e: any) {
       message = "Error: " + e;
@@ -224,12 +229,30 @@
     }
   }
 
+  // Folder a cloud save restores into, picked by the platform its id names.
+  // PSP saves go to a PSP SAVEDATA folder, RetroArch saves to a RetroArch
+  // root; anything else (native Vita saves) has no desktop location.
+  function restoreTargetFor(titleId: string): string | null {
+    const platform = titleId.startsWith("PSP_") ? "psp"
+      : titleId.startsWith("RETROARCH_") ? "retroarch"
+      : null;
+    if (!platform) return null;
+    const src = sources.find(s => s.platform === platform && s.resolvedPath && s.resolvedPath !== "Not found");
+    return src ? src.resolvedPath : null;
+  }
+
   async function handleCloudRestore(titleId: string) {
     try {
-      const target = sources[0]?.resolvedPath || "";
-      if (!target) { message = "Error: no source path to restore to"; return; }
+      const target = restoreTargetFor(titleId);
+      if (!target) {
+        message = titleId.startsWith("PSP_") || titleId.startsWith("RETROARCH_")
+          ? "Error: no matching PSP or RetroArch source folder to restore to"
+          : "Error: this save can only be restored on a Vita";
+        return;
+      }
       message = "Downloading & restoring...";
       const res = await invoke("download_and_restore", { titleId, restoreDir: target });
+      await scanAll();
       message = res as string;
     } catch (e: any) {
       message = "Error: " + e;

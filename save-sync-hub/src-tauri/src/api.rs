@@ -58,12 +58,34 @@ fn auth_value(config: &SyncConfig) -> String {
     format!("Bearer {}", config.api_token)
 }
 
+/// ureq 2 turns every 4xx/5xx into Err, so status handling lives here
+/// rather than after `.call()`. Keeps the server's error body in the message.
+fn request_error(what: &str, err: ureq::Error) -> String {
+    match err {
+        ureq::Error::Status(code, response) => {
+            let body = response.into_string().unwrap_or_default();
+            if body.is_empty() {
+                format!("{} failed (HTTP {})", what, code)
+            } else {
+                format!("{} failed (HTTP {}): {}", what, code, body)
+            }
+        }
+        other => format!("{} failed: {}", what, other),
+    }
+}
+
+/// Hash and version the server reported for a downloaded save.
+pub struct ServedSave {
+    pub hash: String,
+    pub timestamp: String,
+}
+
 pub fn get_manifest(config: &SyncConfig) -> Result<CloudManifest, String> {
     let url = build_url(config, "/api/manifest");
     let response = ureq::get(&url)
         .set("Authorization", &auth_value(config))
         .call()
-        .map_err(|e| format!("Request failed: {}", e))?;
+        .map_err(|e| request_error("Manifest request", e))?;
     let body = response
         .into_string()
         .map_err(|e| format!("Read response failed: {}", e))?;
@@ -84,10 +106,13 @@ pub fn upload_save(
 
     let boundary = format!("SaveSyncHub{}", std::process::id());
     let mut body = Vec::new();
+    // The name comes from a ROM file name; quotes or line breaks would
+    // break the Content-Disposition header.
     let filename = std::path::Path::new(zip_path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("{}.zip", title_id));
+        .unwrap_or_else(|| format!("{}.zip", title_id))
+        .replace(['"', '\\', '\r', '\n'], "_");
 
     let part_header = format!(
         "--{}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: application/zip\r\n\r\n",
@@ -112,61 +137,59 @@ pub fn upload_save(
         request = request.set("X-Content-Hash", content_hash);
     }
 
-    let response = request.send_bytes(&body).map_err(|e| format!("Upload failed: {}", e))?;
-
-    if response.status() != 200 {
-        let body = response
-            .into_string()
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Err(format!("Upload failed: {}", body));
-    }
+    request
+        .send_bytes(&body)
+        .map_err(|e| request_error("Upload", e))?;
     Ok(())
 }
 
-pub fn download_save(config: &SyncConfig, title_id: &str, dest_path: &str) -> Result<(), String> {
+pub fn download_save(
+    config: &SyncConfig,
+    title_id: &str,
+    dest_path: &str,
+) -> Result<ServedSave, String> {
     let url = build_url(config, &format!("/api/save/{}", url_segment(title_id)));
-    let response = ureq::get(&url)
+    let response = match ureq::get(&url)
         .set("Authorization", &auth_value(config))
         .call()
-        .map_err(|e| format!("Download failed: {}", e))?;
+    {
+        Ok(r) => r,
+        Err(ureq::Error::Status(404, _)) => {
+            return Err("No save on server for this game".to_string())
+        }
+        Err(e) => return Err(request_error("Download", e)),
+    };
 
-    let status = response.status();
-    if status == 404 {
-        return Err("No save on server for this game".to_string());
-    }
-    if status != 200 {
-        let body = response
-            .into_string()
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Err(format!("Download failed ({}): {}", status, body));
-    }
+    let served = ServedSave {
+        hash: response.header("X-Save-Hash").unwrap_or_default().to_string(),
+        timestamp: response.header("X-Save-Timestamp").unwrap_or_default().to_string(),
+    };
 
     let mut reader = response.into_reader();
     let mut buf = Vec::new();
     std::io::Read::read_to_end(&mut reader, &mut buf)
         .map_err(|e| format!("Read body failed: {}", e))?;
 
+    // Refuse a truncated or corrupted download before anything extracts it
+    // over the live save folder.
+    if !served.hash.is_empty() && crate::backup::sha256_hex(&buf) != served.hash {
+        return Err("Downloaded save does not match the server's hash, try again".to_string());
+    }
+
     if let Some(parent) = std::path::Path::new(dest_path).parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Create dir failed: {}", e))?;
     }
     std::fs::write(dest_path, &buf).map_err(|e| format!("Write file failed: {}", e))?;
-    Ok(())
+    Ok(served)
 }
 
 pub fn delete_save(config: &SyncConfig, title_id: &str) -> Result<(), String> {
     let url = build_url(config, &format!("/api/save/{}", url_segment(title_id)));
-    let response = ureq::delete(&url)
+    ureq::delete(&url)
         .set("Authorization", &auth_value(config))
         .call()
-        .map_err(|e| format!("Delete failed: {}", e))?;
-
-    if response.status() != 200 {
-        let body = response
-            .into_string()
-            .unwrap_or_else(|_| "unknown".to_string());
-        return Err(format!("Delete failed: {}", body));
-    }
+        .map_err(|e| request_error("Delete", e))?;
     Ok(())
 }
 
@@ -175,7 +198,7 @@ pub fn get_devices(config: &SyncConfig) -> Result<Vec<DeviceEntry>, String> {
     let response = ureq::get(&url)
         .set("Authorization", &auth_value(config))
         .call()
-        .map_err(|e| format!("Request failed: {}", e))?;
+        .map_err(|e| request_error("Devices request", e))?;
     let body = response
         .into_string()
         .map_err(|e| format!("Read response failed: {}", e))?;

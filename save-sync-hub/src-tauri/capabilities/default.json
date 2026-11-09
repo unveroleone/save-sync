@@ -5,24 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "fs:default",
-    "fs:allow-exists",
-    "fs:allow-read-dir",
-    "fs:allow-read-file",
-    "fs:allow-write-file",
-    "fs:allow-mkdir",
-    "fs:allow-remove",
-    {
-      "identifier": "fs:scope",
-      "allow": [
-        { "path": "$HOME/**" },
-        { "path": "$APPDATA/**" },
-        { "path": "$DESKTOP/**" },
-        { "path": "$DOWNLOAD/**" },
-        { "path": "/storage/emulated/0/**" }
-      ]
-    },
-    "http:default",
     "dialog:default",
     "dialog:allow-open"
   ]
