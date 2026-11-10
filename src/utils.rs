@@ -14,9 +14,11 @@ use log::error;
 use zip::ZipWriter;
 
 use crate::{
-    constant::{BACKUP_BLACK_LIST, GAME_SAVE_LOCAL_DIR, PSP_SAVE_DIR, RETROARCH_DIR, SAVE_CLOUD_DIR},
-    emulator::psp_title_prefix,
+    config::Config,
+    constant::{BACKUP_BLACK_LIST, GAME_SAVE_LOCAL_DIR, PSP_SAVE_DIR, RETROARCH_DIR},
+    emulator::{emulator_kind_from_entry_id, psp_title_prefix, EmulatorKind},
     ime::get_current_format_time,
+    psx_vmp::{is_vmp_filename, raw_entry_name, raw_to_vmp, vmp_entry_name, vmp_to_raw, MC_SIZE},
     tai::{change_psv_account_id, get_psv_account_id},
     ui::ui_loading::Loading,
     vita2d::rgba,
@@ -69,14 +71,6 @@ pub fn get_active_color() -> u32 {
     }
 
     rgba(current.0, current.1, current.2, 0xff)
-}
-
-pub fn create_save_cloud_dir_if_not_exists() -> Result<(), Box<dyn Error>> {
-    let path = Path::new(SAVE_CLOUD_DIR);
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-    }
-    Ok(())
 }
 
 /// # get game save list of local dir
@@ -163,6 +157,7 @@ fn zip_dir_named(
     prefix: &str,
     zip_base: &str,
     back_list: &[&str],
+    convert_psx: bool,
 ) -> Result<(), Box<dyn Error>> {
     let options =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -185,18 +180,24 @@ fn zip_dir_named(
             };
             Loading::notify_desc(entry.file_name().to_string_lossy().to_string());
             if path.is_file() {
-                zip.start_file(&name, options)?;
-                let mut input_file = fs::File::open(path)?;
-                loop {
-                    let size = input_file.read(&mut buffer)?;
-                    if size == 0 {
-                        break;
+                if is_vmp_filename(&entry.file_name().to_string_lossy()) {
+                    let (raw_name, bytes) = convert_vmp_entry(convert_psx, &name, fs::read(&path)?);
+                    zip.start_file(&raw_name, options)?;
+                    zip.write_all(&bytes)?;
+                } else {
+                    zip.start_file(&name, options)?;
+                    let mut input_file = fs::File::open(path)?;
+                    loop {
+                        let size = input_file.read(&mut buffer)?;
+                        if size == 0 {
+                            break;
+                        }
+                        zip.write_all(&buffer[0..size])?;
                     }
-                    zip.write_all(&buffer[0..size])?;
                 }
             } else {
                 zip.add_directory(format!("{}/", name), options)?;
-                zip_dir_named(zip, path.as_path(), prefix, zip_base, back_list)?;
+                zip_dir_named(zip, path.as_path(), prefix, zip_base, back_list, convert_psx)?;
             }
         }
     }
@@ -223,10 +224,18 @@ pub fn zip_dirs(
     let options =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     let mut buffer = vec![0; 1024 * 512];
+    let convert_psx = Config::global().convert_psx_saves;
     for (entry_name, source_path) in sources {
         let path = Path::new(source_path);
         if path.is_file() {
             if entry_name.is_empty() {
+                continue;
+            }
+            if is_vmp_filename(entry_name) {
+                let (raw_name, bytes) = convert_vmp_entry(convert_psx, entry_name, fs::read(path)?);
+                #[allow(deprecated)]
+                zip.start_file_from_path(Path::new(&raw_name), options)?;
+                zip.write_all(&bytes)?;
                 continue;
             }
             #[allow(deprecated)]
@@ -252,27 +261,7 @@ pub fn zip_dirs(
         if !entry_name.is_empty() {
             zip.add_directory(format!("{}/", entry_name), options)?;
         }
-        zip_dir_named(&mut zip, Path::new(&root), &root, entry_name, back_list)?;
-    }
-    zip.finish()?;
-    Ok(())
-}
-
-pub fn zip_file(from: &str, name: &str, to: &str) -> Result<(), Box<dyn Error>> {
-    let from_path = Path::new(from).join(name);
-    let mut zip = zip::ZipWriter::new(fs::File::create(to)?);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut buffer = vec![0; 1024 * 512];
-    #[allow(deprecated)]
-    zip.start_file_from_path(Path::new(name), options)?;
-    let mut input_file = fs::File::open(from_path)?;
-    loop {
-        let size = input_file.read(&mut buffer)?;
-        if size == 0 {
-            break;
-        }
-        zip.write_all(&buffer[0..size])?;
+        zip_dir_named(&mut zip, Path::new(&root), &root, entry_name, back_list, convert_psx)?;
     }
     zip.finish()?;
     Ok(())
@@ -330,14 +319,6 @@ pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<
         }
     }
     Ok(0)
-}
-
-pub fn join_path(base: &str, path: &str) -> String {
-    if base == "" || base.ends_with("/") {
-        format!("{}{}", base, path)
-    } else {
-        format!("{}/{}", base, path)
-    }
 }
 
 pub fn update_sfo_file_with_current_account_id(sfo_path: &str) -> Result<(), Box<dyn Error>> {
@@ -544,6 +525,31 @@ fn backup_save_target_inner(
     res
 }
 
+/// Converts an Adrenaline PSX memory card (`SCEVMC0.VMP`/`SCEVMC1.VMP`) to
+/// its raw, header-stripped form and renames its archive/hash entry to
+/// match (e.g. `SCEVMC0.VMP` -> `SCEVMC0.MCR`), preserving any directory
+/// prefix, so the server always holds the canonical raw format under a name
+/// that honestly reflects it. Returns `entry_name`/`bytes` unchanged for
+/// anything that isn't a VMP filename, when PSX conversion is off in
+/// Settings, or if the bytes don't look like a valid VMP.
+///
+/// Takes `convert_enabled` rather than reading `Config::global()` itself so
+/// callers processing many files in one pass can read it once.
+fn convert_vmp_entry(convert_enabled: bool, entry_name: &str, bytes: Vec<u8>) -> (String, Vec<u8>) {
+    if !convert_enabled || !is_vmp_filename(entry_name) {
+        return (entry_name.to_string(), bytes);
+    }
+    match vmp_to_raw(&bytes) {
+        Some(raw_bytes) => {
+            let raw_name = raw_entry_name(entry_name)
+                .map(|raw| Path::new(entry_name).with_file_name(raw).to_string_lossy().into_owned())
+                .unwrap_or_else(|| entry_name.to_string());
+            (raw_name, raw_bytes)
+        }
+        None => (entry_name.to_string(), bytes),
+    }
+}
+
 /// Canonical content hash of a save: sha256 over `(relative path, bytes)` of
 /// every file, sorted by relative path. Identical on every device because it
 /// never sees absolute paths, so the Vita app and the hub can compare saves
@@ -551,6 +557,7 @@ fn backup_save_target_inner(
 pub fn content_hash_sources(sources: &[(String, String)]) -> Option<String> {
     use sha2::{Digest, Sha256};
 
+    let convert_psx = Config::global().convert_psx_saves;
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
     for (entry_name, path) in sources {
         let p = Path::new(path);
@@ -565,6 +572,7 @@ pub fn content_hash_sources(sources: &[(String, String)]) -> Option<String> {
                     continue;
                 }
                 let bytes = fs::read(format!("{}/{}", path, rel)).ok()?;
+                let (rel, bytes) = convert_vmp_entry(convert_psx, &rel, bytes);
                 let full = if entry_name.is_empty() {
                     rel
                 } else {
@@ -577,7 +585,7 @@ pub fn content_hash_sources(sources: &[(String, String)]) -> Option<String> {
                 continue;
             }
             let bytes = fs::read(path).ok()?;
-            files.push((entry_name.clone(), bytes));
+            files.push(convert_vmp_entry(convert_psx, entry_name, bytes));
         }
     }
     files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -659,6 +667,20 @@ fn archive_file_entries(from: &str) -> Vec<String> {
 /// archives hold per-game files below the retroarch root. Native saves must
 /// restore through the Games tab (PFS mount), so they get None.
 pub fn save_target_for_downloaded_archive(title_id: &str, from: &str) -> Option<SaveTarget> {
+    let convert_psx = Config::global().convert_psx_saves;
+    if emulator_kind_from_entry_id(title_id, convert_psx) == Some(EmulatorKind::Psx) {
+        // PSX archives are Files-layout (just the memory cards, see
+        // save_target_excluding's Psx arm), not PSP's whole-folder Folders
+        // layout — archive_has_foreign_files only checks Files targets.
+        let files: Vec<String> = archive_file_entries(from)
+            .iter()
+            .map(|n| format!("{}/{}", PSP_SAVE_DIR, n))
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        return Some(SaveTarget::files(&files, PSP_SAVE_DIR));
+    }
     if title_id.starts_with("PSP_") {
         let sources: Vec<(String, String)> = archive_top_level_dirs(from)
             .iter()
@@ -705,11 +727,14 @@ fn file_stem_of(name: &str) -> String {
 fn archive_has_foreign_files(target: &SaveTarget, from: &str) -> bool {
     const RA_SAVE_DIRS: [&str; 4] = ["savefiles", "savestates", "saves", "states"];
 
-    let target_stem = target
-        .sources
-        .first()
-        .map(|(name, _)| file_stem_of(name))
-        .unwrap_or_default();
+    // PSP_SAVE_DIR is just as much a shared pool as RETROARCH_DIR, so this
+    // check applies to every Files-layout target — but only RetroArch's
+    // archived paths are expected to start under one of RA_SAVE_DIRS (a PSX
+    // entry is named `<title-id>/<file>` instead), so that particular check
+    // stays scoped to RetroArch's own layout. A PSX target also has two
+    // stems (SCEVMC0/SCEVMC1) instead of one, hence the set.
+    let target_stems: std::collections::HashSet<String> =
+        target.sources.iter().map(|(name, _)| file_stem_of(name)).collect();
 
     let file = match fs::File::open(from) {
         Ok(file) => file,
@@ -727,16 +752,18 @@ fn archive_has_foreign_files(target: &SaveTarget, from: &str) -> bool {
         if name.ends_with('/') {
             continue;
         }
-        let top = name.split('/').next().unwrap_or("");
-        if !RA_SAVE_DIRS.contains(&top) {
-            return true;
+        if target.restore_root == RETROARCH_DIR {
+            let top = name.split('/').next().unwrap_or("");
+            if !RA_SAVE_DIRS.contains(&top) {
+                return true;
+            }
         }
-        // Without a stem to compare against, fall back to exact membership.
-        if target_stem.is_empty() {
+        // Without stems to compare against, fall back to exact membership.
+        if target_stems.is_empty() {
             if !target.sources.iter().any(|(n, _)| n == &name) {
                 return true;
             }
-        } else if file_stem_of(&name) != target_stem {
+        } else if !target_stems.contains(&file_stem_of(&name)) {
             return true;
         }
     }
@@ -819,12 +846,104 @@ pub fn restore_save_target(target: &SaveTarget, from: &str) -> Result<(), Box<dy
         }
     }
     Loading::notify_title("Restoring save...".to_string());
-    let mut res = zip_extract(from, &to, Some(&BACKUP_BLACK_LIST));
-    if res.is_ok() {
-        let sfo_path = format!("{}/sce_sys/param.sfo", to);
-        res = update_sfo_file_with_current_account_id(&sfo_path);
+    let res = zip_extract(from, &to, Some(&BACKUP_BLACK_LIST));
+    if res.is_err() {
+        return res;
     }
-    res
+    // Run both post-extract steps even if the first fails, so a repack
+    // failure doesn't hide a real SFO error underneath it.
+    let repack_res = repack_vmp_saves(target).map_err(|e| e.into());
+    let sfo_path = format!("{}/sce_sys/param.sfo", to);
+    let sfo_res = update_sfo_file_with_current_account_id(&sfo_path);
+    repack_res.and(sfo_res)
+}
+
+/// After a restore, re-wraps any `SCEVMC0.VMP`/`SCEVMC1.VMP` file the
+/// archive left in raw (headerless) form — the server always stores these
+/// raw, so a restore just extracted the canonical raw bytes under the VMP
+/// filename. A no-op for every non-PSX save.
+///
+/// Requires this device to already have a real `PARAM.SFO` for the title —
+/// its integrity fields need KIRK hardware crypto this app can't reach.
+/// `Err` names any file it couldn't repack for this reason. Callers should
+/// prefer checking ahead of time (`sync_engine::cannot_restore_here`) —
+/// this is the last-resort safety net.
+///
+/// When a `PARAM.SFO` is present, reuses whatever VMP already exists at the
+/// target path as a header template; if just the VMP is missing, `raw_to_vmp`
+/// builds a fresh header instead.
+fn repack_vmp_saves(target: &SaveTarget) -> Result<(), String> {
+    // A Grouped-layout source is a whole folder; a Files-layout source
+    // (PSX's memory cards) is the individual file itself, so the folder to
+    // scan is its parent. Dedup so a PSX entry's two files (same folder)
+    // don't scan+repack the same directory twice.
+    let mut dirs: Vec<&Path> = Vec::new();
+    for (_, source) in &target.sources {
+        let path = Path::new(source);
+        let dir = if path.is_dir() {
+            path
+        } else {
+            match path.parent() {
+                Some(p) => p,
+                None => continue,
+            }
+        };
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+
+    let mut missing_template = false;
+    for dir in dirs {
+        // PARAM.SFO, not the VMP itself, is the real gate — its integrity
+        // fields need KIRK hardware crypto this app can't reach, so a
+        // repack only makes sense if Adrenaline already created one here.
+        let has_param_sfo = dir.join("PARAM.SFO").exists();
+        let Ok(entries) = dir.read_dir() else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let Some(vmp_name) = vmp_entry_name(&name) else {
+                continue;
+            };
+            let raw_path = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.len() as usize != MC_SIZE {
+                continue;
+            }
+            if !has_param_sfo {
+                missing_template = true;
+                continue;
+            }
+            let Ok(raw) = fs::read(&raw_path) else {
+                continue;
+            };
+            // Reuse whatever VMP already lives at the target path (from the
+            // title's existing install) as the header template before it's
+            // overwritten below; missing or invalid both fall through to
+            // raw_to_vmp's own from-scratch header — safe here since
+            // PARAM.SFO already proved Adrenaline set this title up before.
+            let vmp_path = raw_path.with_file_name(vmp_name);
+            let existing_header = fs::read(&vmp_path).ok();
+            let Some(vmp) = raw_to_vmp(&raw, existing_header.as_deref())
+                .or_else(|| raw_to_vmp(&raw, None))
+            else {
+                continue; // raw wasn't MC_SIZE — can't happen, checked above
+            };
+            if fs::write(&vmp_path, vmp).is_ok() {
+                let _ = fs::remove_file(&raw_path);
+            }
+        }
+    }
+
+    if !missing_template {
+        Ok(())
+    } else {
+        Err("no local PSX save to repack from — launch via Adrenaline first".to_string())
+    }
 }
 
 pub fn base64_encode(data: &[u8]) -> String {
@@ -833,10 +952,6 @@ pub fn base64_encode(data: &[u8]) -> String {
 
 pub fn base64_decode(data: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(general_purpose::STANDARD.decode(data)?)
-}
-
-pub fn get_str_md5(data: &[u8]) -> String {
-    format!("{:x}", md5::compute(data))
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {

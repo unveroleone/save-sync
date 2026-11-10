@@ -256,6 +256,69 @@ pub fn unmount_pfs() -> i32 {
     unsafe { pfs_unmount() }
 }
 
+/// Handshake for mounting a PFS save dir from a worker thread. Only the main
+/// thread may call mount_pfs, so a worker requests a mount and blocks in
+/// `wait_for_mount` while the main thread performs it via `pump`, called once
+/// per frame.
+#[derive(Clone)]
+pub struct PfsMountHandshake {
+    prepare_to_mount: std::sync::Arc<std::sync::RwLock<Option<String>>>,
+    on_mounted: std::sync::Arc<std::sync::RwLock<Option<String>>>,
+}
+
+impl PfsMountHandshake {
+    pub fn new() -> Self {
+        Self {
+            prepare_to_mount: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            on_mounted: std::sync::Arc::new(std::sync::RwLock::new(None)),
+        }
+    }
+
+    /// Main-thread side: call once per frame. Mounts a pending request, if any.
+    pub fn pump(&self) {
+        let prepare_dir = match self.prepare_to_mount.try_write() {
+            Ok(mut prepare_dir) => prepare_dir.take(),
+            _ => None,
+        };
+        if let Some(prepare_dir) = prepare_dir {
+            mount_pfs(&prepare_dir);
+            *self.on_mounted.write().unwrap() = Some(prepare_dir);
+        }
+    }
+
+    /// Worker-thread side: park until `game_save_dir` is mounted. Returns
+    /// false if `cancel` fired first, in which case nothing was mounted.
+    pub fn wait_for_mount(&self, cancel: &std::sync::Arc<std::sync::atomic::AtomicBool>, game_save_dir: &str) -> bool {
+        let mut is_prepare = false;
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return false;
+            }
+            if let Ok(mounted) = self.on_mounted.try_read() {
+                if let Some(mounted) = mounted.as_ref() {
+                    if mounted == game_save_dir {
+                        return true;
+                    }
+                }
+            }
+            if !is_prepare {
+                if let Ok(mut prepare) = self.prepare_to_mount.try_write() {
+                    is_prepare = true;
+                    *prepare = Some(game_save_dir.to_string());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Forget which save is mounted. Call after any unmount, or a later run
+    /// sees a stale match and skips its mount request.
+    pub fn clear(&self) {
+        *self.on_mounted.write().unwrap() = None;
+        *self.prepare_to_mount.write().unwrap() = None;
+    }
+}
+
 pub fn get_psv_account_id() -> u64 {
     unsafe { get_account_id() }
 }

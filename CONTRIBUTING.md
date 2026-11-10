@@ -24,17 +24,20 @@ CI builds via `.github/workflows/build.yml` on every `v*` tag push.
 │   ├── main.rs             # Entry point, tokio runtime
 │   ├── config.rs           # JSON config read/write (server URL, token)
 │   ├── api.rs              # HTTP client (ureq) — server communication
-│   ├── sync.rs             # Manifest comparison, sync status computation
+│   ├── sync.rs             # Content-hash comparison, status_for() sync status
+│   ├── sync_engine.rs      # SyncEngine — fetch/upload/download/Sync All, shared by the Games tab
+│   ├── emulator.rs         # PSP/RetroArch entry scanning
 │   ├── utils.rs            # Backup/restore, SHA-256, ZIP handling
 │   ├── tai.rs              # taiHEN integration, game detection, PFS mount
 │   ├── ime.rs              # On-screen keyboard wrapper
 │   ├── constant.rs         # Paths, labels, all user-facing strings
 │   └── ui/                 # UI layer
 │       ├── ui_base.rs      # UIBase trait (update, draw, invalidate)
-│       ├── ui_desktop.rs   # Main two-tab view (Games | Cloud), splash screen
-│       ├── ui_cloud.rs     # Cloud tab — per-game sync status list
-│       ├── ui_settings.rs  # Server config screen
-│       ├── ui_titles/      # Game list + save drawer (local + cloud tabs)
+│       ├── ui_desktop.rs   # Top-level two-tab view (Games | Settings), splash screen
+│       ├── ui_settings.rs  # Settings tab — server config + sync exclusions
+│       ├── ui_titles/      # Games tab: grid + save drawer (local + manage tabs)
+│       ├── list_state.rs   # Shared scroll/selection state for list-style screens
+│       ├── ui_drawer.rs    # Half-screen slide-in drawer used by the save menu
 │       ├── ui_dialog.rs    # Confirmation dialogs
 │       ├── ui_list.rs      # List rendering trait
 │       ├── ui_loading.rs   # Full-screen loading overlay
@@ -78,7 +81,7 @@ Git tags trigger CI releases. Match the tag to the Cargo.toml version: `v0.1.1` 
 
 ### UI invalidation
 
-`UIBase::invalidate()` is called when the user switches tabs (L/R triggers). `UICloud` clears its games list so it re-fetches from the server. This keeps the cloud status fresh after uploads.
+`UIBase::invalidate()` re-syncs a screen with state that changed elsewhere. `UITitles` uses it to re-scan sync exclusions and clear `SyncEngine`'s cached games (forcing a re-fetch) after Settings closes or an exclusion is toggled from the save drawer's Manage tab, so badges never go stale.
 
 ### Server auth
 

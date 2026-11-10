@@ -2,7 +2,9 @@ use crate::{
     api::Api,
     config::Config,
     constant::{SCREEN_HEIGHT, SCREEN_WIDTH},
+    emulator::{emulator_kind_from_entry_id, EmulatorKind},
     ime::show_keyboard,
+    sync::LocalManifest,
     ui::{list_state::ListState, ui_loading::Loading, ui_toast::Toast},
     vita2d::{
         is_button, rgba, vita2d_draw_rect, vita2d_draw_text, vita2d_line, vita2d_text_height,
@@ -17,7 +19,6 @@ pub struct UISettings {
     config: Config,
     testing: bool,
     loading_devices: bool,
-    pub dirty: bool,
     pub should_close: bool,
     /// Nested sub-screen: every known game, grouped under its platform's
     /// category toggle.
@@ -25,10 +26,12 @@ pub struct UISettings {
     exclusions_list: ListState,
     native_games: Vec<(String, String)>,
     psp_games: Vec<(String, String)>,
+    psx_games: Vec<(String, String)>,
     retroarch_games: Vec<(String, String)>,
     games_loaded: bool,
     collapsed_native: bool,
     collapsed_psp: bool,
+    collapsed_psx: bool,
     collapsed_retroarch: bool,
     /// Cached; rebuilt on load or fold toggle, not every frame.
     exclusion_rows: Vec<ExclusionRow>,
@@ -39,6 +42,7 @@ pub struct UISettings {
 enum SettingsCategory {
     Native,
     Psp,
+    Psx,
     RetroArch,
 }
 
@@ -48,22 +52,27 @@ enum ExclusionRow {
 }
 
 impl UISettings {
+    fn commit(&self) {
+        Config::commit(self.config.clone());
+    }
+
     pub fn new(config: &Config) -> Self {
         UISettings {
             selected_idx: 0,
             config: config.clone(),
             testing: false,
             loading_devices: false,
-            dirty: false,
             should_close: false,
             exclusions_view: false,
             exclusions_list: ListState::new(10),
             native_games: Vec::new(),
             psp_games: Vec::new(),
+            psx_games: Vec::new(),
             retroarch_games: Vec::new(),
             games_loaded: false,
             collapsed_native: false,
             collapsed_psp: false,
+            collapsed_psx: false,
             collapsed_retroarch: false,
             exclusion_rows: Vec::new(),
             total_excluded_count: 0,
@@ -74,6 +83,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.collapsed_native,
             SettingsCategory::Psp => self.collapsed_psp,
+            SettingsCategory::Psx => self.collapsed_psx,
             SettingsCategory::RetroArch => self.collapsed_retroarch,
         }
     }
@@ -82,6 +92,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.collapsed_native = collapsed,
             SettingsCategory::Psp => self.collapsed_psp = collapsed,
+            SettingsCategory::Psx => self.collapsed_psx = collapsed,
             SettingsCategory::RetroArch => self.collapsed_retroarch = collapsed,
         }
         self.rebuild_exclusion_rows();
@@ -92,7 +103,9 @@ impl UISettings {
     }
 
     fn field_count(&self) -> i32 {
-        7 // URL, Token, Device Name, Test Connection, Connected Devices, Sync Exclusions, Save & Back
+        // URL, Token, Device Name, Test Connection, Connected Devices,
+        // Sync Exclusions, Convert PSX Saves
+        7
     }
 
     fn load_all_games(&mut self, app_data: &crate::app::AppData) {
@@ -102,16 +115,37 @@ impl UISettings {
             .map(|t| (t.title_id().to_string(), t.name().to_string()))
             .collect();
         self.psp_games.clear();
+        self.psx_games.clear();
         self.retroarch_games.clear();
         for e in crate::emulator::scan_emulator_entries() {
             match e.kind {
                 crate::emulator::EmulatorKind::Psp => self.psp_games.push((e.id, e.name)),
+                crate::emulator::EmulatorKind::Psx => self.psx_games.push((e.id, e.name)),
                 crate::emulator::EmulatorKind::RetroArch => self.retroarch_games.push((e.id, e.name)),
+            }
+        }
+        // Saves the server has that this device hasn't scanned locally
+        // wouldn't otherwise be listed at all — this screen has no network
+        // access of its own, so it relies on the Games tab's last fetch.
+        for (id, name) in LocalManifest::load().cloud_titles {
+            let known = self.native_games.iter().any(|(i, _)| i == &id)
+                || self.psp_games.iter().any(|(i, _)| i == &id)
+                || self.psx_games.iter().any(|(i, _)| i == &id)
+                || self.retroarch_games.iter().any(|(i, _)| i == &id);
+            if known {
+                continue;
+            }
+            match emulator_kind_from_entry_id(&id, self.config.convert_psx_saves) {
+                None => self.native_games.push((id, name)),
+                Some(EmulatorKind::Psp) => self.psp_games.push((id, name)),
+                Some(EmulatorKind::Psx) => self.psx_games.push((id, name)),
+                Some(EmulatorKind::RetroArch) => self.retroarch_games.push((id, name)),
             }
         }
         // Already-excluded categories start folded.
         self.collapsed_native = self.config.sync_exclude_all_native;
         self.collapsed_psp = self.config.sync_exclude_all_psp;
+        self.collapsed_psx = self.config.sync_exclude_all_psx;
         self.collapsed_retroarch = self.config.sync_exclude_all_retroarch;
         self.rebuild_exclusion_rows();
         self.recompute_total_excluded();
@@ -122,6 +156,7 @@ impl UISettings {
         for (category, games) in [
             (SettingsCategory::Native, &self.native_games),
             (SettingsCategory::Psp, &self.psp_games),
+            (SettingsCategory::Psx, &self.psx_games),
             (SettingsCategory::RetroArch, &self.retroarch_games),
         ] {
             rows.push(ExclusionRow::Category(category));
@@ -149,6 +184,7 @@ impl UISettings {
         };
         self.total_excluded_count = count(&self.native_games, self.config.sync_exclude_all_native)
             + count(&self.psp_games, self.config.sync_exclude_all_psp)
+            + count(&self.psx_games, self.config.sync_exclude_all_psx)
             + count(&self.retroarch_games, self.config.sync_exclude_all_retroarch);
     }
 
@@ -156,6 +192,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.config.sync_exclude_all_native,
             SettingsCategory::Psp => self.config.sync_exclude_all_psp,
+            SettingsCategory::Psx => self.config.sync_exclude_all_psx,
             SettingsCategory::RetroArch => self.config.sync_exclude_all_retroarch,
         }
     }
@@ -164,6 +201,7 @@ impl UISettings {
         match category {
             SettingsCategory::Native => self.config.sync_exclude_all_native = excluded,
             SettingsCategory::Psp => self.config.sync_exclude_all_psp = excluded,
+            SettingsCategory::Psx => self.config.sync_exclude_all_psx = excluded,
             SettingsCategory::RetroArch => self.config.sync_exclude_all_retroarch = excluded,
         }
         self.set_collapsed(category, excluded);
@@ -171,6 +209,7 @@ impl UISettings {
             let games = match category {
                 SettingsCategory::Native => &self.native_games,
                 SettingsCategory::Psp => &self.psp_games,
+                SettingsCategory::Psx => &self.psx_games,
                 SettingsCategory::RetroArch => &self.retroarch_games,
             };
             for (id, _) in games {
@@ -248,7 +287,7 @@ impl UISettings {
                     let category = *category;
                     let excluded = !self.category_flag(category);
                     self.set_category_flag(category, excluded);
-                    self.dirty = true;
+                    self.commit();
                 }
                 Some(ExclusionRow::Game(category, id, _)) => {
                     // Locked while the category covers it.
@@ -257,7 +296,7 @@ impl UISettings {
                         let excluded = !self.config.is_sync_excluded(&id);
                         self.config.set_sync_excluded(&id, excluded);
                         self.recompute_total_excluded();
-                        self.dirty = true;
+                        self.commit();
                     }
                 }
                 None => {}
@@ -301,11 +340,13 @@ impl UISettings {
                     let count = match category {
                         SettingsCategory::Native => self.native_games.len(),
                         SettingsCategory::Psp => self.psp_games.len(),
+                        SettingsCategory::Psx => self.psx_games.len(),
                         SettingsCategory::RetroArch => self.retroarch_games.len(),
                     };
                     let name = match category {
                         SettingsCategory::Native => "All Native Vita Games",
                         SettingsCategory::Psp => "All PSP Games",
+                        SettingsCategory::Psx => "All PSX Games",
                         SettingsCategory::RetroArch => "All RetroArch Games",
                     };
                     let fold = if self.is_collapsed(*category) { "+" } else { "-" };
@@ -470,8 +511,6 @@ impl UIBase for UISettings {
         }
 
         if is_button(buttons, SceCtrlButtons::SceCtrlCircle) {
-            // Save and close (changed: always persist)
-            self.dirty = true;
             self.should_close = true;
             return;
         }
@@ -486,21 +525,21 @@ impl UIBase for UISettings {
                     let input = show_keyboard(&self.config.server_url);
                     if !input.is_empty() {
                         self.config.server_url = input.to_string();
-                        self.dirty = true;
+                        self.commit();
                     }
                 }
                 1 => {
                     let input = show_keyboard(&self.config.api_token);
                     if !input.is_empty() {
                         self.config.api_token = input.to_string();
-                        self.dirty = true;
+                        self.commit();
                     }
                 }
                 2 => {
                     let input = show_keyboard(&self.config.device_name);
                     if !input.is_empty() {
                         self.config.device_name = input.to_string();
-                        self.dirty = true;
+                        self.commit();
                     }
                 }
                 3 => {
@@ -522,8 +561,8 @@ impl UIBase for UISettings {
                     self.exclusions_view = true;
                 }
                 6 => {
-                    self.dirty = true;
-                    self.should_close = true;
+                    self.config.convert_psx_saves = !self.config.convert_psx_saves;
+                    self.commit();
                 }
                 _ => {}
             }
@@ -537,20 +576,10 @@ impl UIBase for UISettings {
             return;
         }
 
-        // cover the tab bar and background drawn by UIDesktop
-        vita2d_draw_rect(0.0, 0.0, SCREEN_WIDTH as f32, SCREEN_HEIGHT as f32, rgba(0x10, 0x10, 0x10, 0xff));
-
-        // header
-        let title = "Settings";
-        vita2d_draw_text(
-            (SCREEN_WIDTH - vita2d_text_width(1.0, title)) / 2,
-            40,
-            rgba(0xff, 0xff, 0xff, 0xff),
-            1.0,
-            title,
-        );
-        vita2d_line(0.0, 60.0, SCREEN_WIDTH as f32, 60.0, rgba(0x66, 0x66, 0x66, 0xff));
-
+        // Renders into the same content area UIDesktop already reserves for
+        // the active tab (below its top line, above its bottom bar) — no
+        // full-screen cover or own header/bottom bar, those are the
+        // desktop's job now that this is a tab and not a full-screen drawer.
         self.draw_field(0, "Server URL", &self.config.server_url, true);
         self.draw_field(1, "API Token", &self.mask_token(), true);
         self.draw_field(2, "Device Name", &self.config.device_name, true);
@@ -582,35 +611,21 @@ impl UIBase for UISettings {
             vita2d_draw_text(x + (SCREEN_WIDTH - 24) - 16 - sw, y_excl + 22, rgba(0xaa, 0xaa, 0xaa, 0xff), 1.0, &summary);
         }
 
-        // Save & Back
-        let y_back = 100 + 44 * 6;
-        if self.selected_idx == 6 {
-            vita2d_draw_rect(x as f32, y_back as f32, (SCREEN_WIDTH - 24) as f32, 42.0, rgba(0x44, 0x44, 0x44, 0xff));
-        }
-        vita2d_draw_text(x + 8, y_back + 22, rgba(0xff, 0x88, 0x88, 0xff), 1.0, "Save && Back");
-
-        // Bottom bar
-        let bar = "(X) Edit    (O) Save & Back";
-        vita2d_line(
-            0.0,
-            (SCREEN_HEIGHT - 58) as f32,
-            SCREEN_WIDTH as f32,
-            (SCREEN_HEIGHT - 58) as f32,
-            rgba(0x99, 0x99, 0x99, 0xff),
-        );
-        vita2d_draw_text(
-            SCREEN_WIDTH - 12 - vita2d_text_width(1.0, bar),
-            SCREEN_HEIGHT - 58 / 2 + vita2d_text_height(1.0, bar) / 2,
-            rgba(0xff, 0xff, 0xff, 0xff),
-            1.0,
-            bar,
+        self.draw_field(
+            6,
+            "Convert PSX Saves",
+            if self.config.convert_psx_saves { "On" } else { "Off" },
+            false,
         );
 
         self.draw_testing_overlay();
     }
 
     fn is_forces(&self) -> bool {
-        true
+        // At the plain field list, this behaves like a normal tab (L can
+        // switch away at any time). The nested exclusions screen and the
+        // async test/device calls still own input exclusively.
+        self.testing || self.loading_devices || self.exclusions_view
     }
 }
 
@@ -622,7 +637,4 @@ impl UISettings {
         "••••••••".to_string()
     }
 
-    pub fn get_config(&self) -> &Config {
-        &self.config
-    }
 }
