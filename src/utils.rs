@@ -14,7 +14,7 @@ use log::error;
 use zip::ZipWriter;
 
 use crate::{
-    constant::{BACKUP_BLACK_LIST, GAME_SAVE_LOCAL_DIR, PSP_SAVE_DIR, RETROARCH_DIR, SAVE_CLOUD_DIR},
+    constant::{BACKUP_BLACK_LIST, GAME_SAVE_LOCAL_DIR, PSP_SAVE_DIR, RETROARCH_DIR},
     emulator::psp_title_prefix,
     ime::get_current_format_time,
     tai::{change_psv_account_id, get_psv_account_id},
@@ -69,14 +69,6 @@ pub fn get_active_color() -> u32 {
     }
 
     rgba(current.0, current.1, current.2, 0xff)
-}
-
-pub fn create_save_cloud_dir_if_not_exists() -> Result<(), Box<dyn Error>> {
-    let path = Path::new(SAVE_CLOUD_DIR);
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-    }
-    Ok(())
 }
 
 /// # get game save list of local dir
@@ -258,26 +250,6 @@ pub fn zip_dirs(
     Ok(())
 }
 
-pub fn zip_file(from: &str, name: &str, to: &str) -> Result<(), Box<dyn Error>> {
-    let from_path = Path::new(from).join(name);
-    let mut zip = zip::ZipWriter::new(fs::File::create(to)?);
-    let options =
-        zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut buffer = vec![0; 1024 * 512];
-    #[allow(deprecated)]
-    zip.start_file_from_path(Path::new(name), options)?;
-    let mut input_file = fs::File::open(from_path)?;
-    loop {
-        let size = input_file.read(&mut buffer)?;
-        if size == 0 {
-            break;
-        }
-        zip.write_all(&buffer[0..size])?;
-    }
-    zip.finish()?;
-    Ok(())
-}
-
 pub fn zip_extract(
     from: impl AsRef<Path>,
     to: impl AsRef<Path>,
@@ -330,14 +302,6 @@ pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<
         }
     }
     Ok(0)
-}
-
-pub fn join_path(base: &str, path: &str) -> String {
-    if base == "" || base.ends_with("/") {
-        format!("{}{}", base, path)
-    } else {
-        format!("{}/{}", base, path)
-    }
 }
 
 pub fn update_sfo_file_with_current_account_id(sfo_path: &str) -> Result<(), Box<dyn Error>> {
@@ -833,10 +797,6 @@ pub fn base64_encode(data: &[u8]) -> String {
 
 pub fn base64_decode(data: &str) -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(general_purpose::STANDARD.decode(data)?)
-}
-
-pub fn get_str_md5(data: &[u8]) -> String {
-    format!("{:x}", md5::compute(data))
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
